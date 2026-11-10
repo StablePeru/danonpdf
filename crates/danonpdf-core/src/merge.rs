@@ -19,8 +19,12 @@
 //! - the document information (title, author) and metadata.
 
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fmt;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufWriter};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use lopdf::{Dictionary, Document, Object, ObjectId, dictionary};
 
@@ -42,8 +46,8 @@ pub enum MergeError {
     Encrypted { input: usize },
     /// An input opened, but its structure is broken.
     Broken { input: usize, reason: &'static str },
-    /// The merged document could not be written. lopdf's `save` reports a
-    /// plain input/output error, not a `lopdf::Error`.
+    /// The merged document could not be written. Writing reports a plain
+    /// input/output error, not a `lopdf::Error`.
     Save {
         path: PathBuf,
         source: std::io::Error,
@@ -120,6 +124,11 @@ pub fn merge_documents(documents: Vec<Document>) -> Result<Document, MergeError>
     // winner into a new `String`, so the borrow ends here and the documents
     // can be moved in the loop below. The list is not empty, so `max()`
     // always finds one and the fallback is never used.
+    //
+    // `max()` compares the versions as text, character by character. That
+    // gives the right answer for every real PDF version ("1.0" to "1.7", and
+    // "2.0"), because each part has one digit. It would put "1.10" before
+    // "1.9", but no such version exists.
     let version = documents
         .iter()
         .map(|document| document.version.as_str())
@@ -187,12 +196,11 @@ fn take_pages(
     // cannot collide with the inputs merged before it.
     document.renumber_objects_with(first_id);
 
-    let root_id = page_tree_root(document).ok_or(InputProblem::Broken("it has no page tree"))?;
-    let catalog_id = document
-        .trailer
-        .get(b"Root")
-        .and_then(Object::as_reference)
-        .map_err(|_| InputProblem::Broken("it has no catalog"))?;
+    // The catalog first: the page tree hangs from it, so without a catalog
+    // "no page tree" would be true but would hide the real problem.
+    let catalog_id = catalog_of(document).ok_or(InputProblem::Broken("it has no catalog"))?;
+    let root_id =
+        page_tree_root(document, catalog_id).ok_or(InputProblem::Broken("it has no page tree"))?;
 
     // `page_iter` borrows the document, and the loop below needs to change
     // it. Collecting the ids into a `Vec` first ends that borrow.
@@ -230,12 +238,21 @@ fn is_locked(document: &Document) -> bool {
     document.trailer.has(b"Encrypt") && document.encryption_state.is_none()
 }
 
-/// The id of the root `Pages` node, named by the catalog.
-fn page_tree_root(document: &Document) -> Option<ObjectId> {
+/// The id of the catalog, named by the trailer's `/Root`, if that object is
+/// really there.
+fn catalog_of(document: &Document) -> Option<ObjectId> {
     // `.ok()?` turns each lopdf `Result` into an `Option` and returns `None`
     // at the first step that fails.
+    let id = document.trailer.get(b"Root").ok()?.as_reference().ok()?;
+    // Only checked, not kept: we need the id, not the dictionary.
+    document.get_dictionary(id).ok()?;
+    Some(id)
+}
+
+/// The id of the root `Pages` node, named by the catalog.
+fn page_tree_root(document: &Document, catalog_id: ObjectId) -> Option<ObjectId> {
     document
-        .catalog()
+        .get_dictionary(catalog_id)
         .ok()?
         .get(b"Pages")
         .ok()?
@@ -330,9 +347,11 @@ fn page_tree_nodes(
 /// The inputs are only borrowed (`&[P]`): the caller keeps its list. `P` can
 /// be anything that looks like a path (`&str`, `String`, `PathBuf`...).
 ///
-/// Every input is read into memory before `output` is written, so `output`
-/// may be one of the inputs. Objects that nothing uses any more, such as the
-/// inputs' bookmarks, are removed before saving.
+/// Every input is read into memory before `output` is written, and `output`
+/// is replaced in one step (see [`save_atomically`]), so `output` may be one
+/// of the inputs: if the save fails, that input is still intact. Objects that
+/// nothing uses any more, such as the inputs' bookmarks, are removed before
+/// saving.
 pub fn merge_files<P: AsRef<Path>>(inputs: &[P], output: &Path) -> Result<usize, MergeError> {
     // `collect` into a `Result<Vec<_>, _>` stops at the first error and
     // returns it; `?` then hands that error to our caller.
@@ -346,11 +365,105 @@ pub fn merge_files<P: AsRef<Path>>(inputs: &[P], output: &Path) -> Result<usize,
     merged.prune_objects();
     let page_count = merged.page_iter().count();
 
-    merged.save(output).map_err(|source| MergeError::Save {
+    save_atomically(&mut merged, output).map_err(|source| MergeError::Save {
         path: output.to_path_buf(),
         source,
     })?;
     Ok(page_count)
+}
+
+/// Saves `document` at `path` without ever leaving a half-written file there.
+///
+/// Writing straight into `path` would first empty the file and then fill it
+/// again. If that stops halfway (disk full, a crash, the process killed), the
+/// old contents are gone and the new ones are incomplete. Since `path` may be
+/// one of the inputs, that would destroy the user's own file.
+///
+/// So the document goes to a temporary file in the same folder first. Only
+/// once it is complete and on the disk does `rename` give it the name `path`,
+/// replacing whatever was there. A rename does not copy any data: it points
+/// the name at the other file, in one step. Anyone opening `path` gets either
+/// the old file or the new one, never a mix. `std::fs::rename` replaces an
+/// existing file on Linux, macOS and Windows alike.
+fn save_atomically(document: &mut Document, path: &Path) -> io::Result<()> {
+    let temporary = temporary_path_for(path)?;
+    // `create_new` refuses to open a file that already exists, so we never
+    // write over a file that happens to have the same name.
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+
+    // From here on the temporary file exists, so every failure must remove
+    // it. Doing the steps in their own function lets `?` stop at the first
+    // failure while we still get the chance to clean up here.
+    let result = write_and_replace(document, file, &temporary, path);
+    if result.is_err() {
+        // Best effort: if the removal fails too, there is nothing better to
+        // do, and the save error is the one worth reporting.
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// Writes `document` into `file` (open at `temporary`), makes sure it is on
+/// the disk, and renames it to `path`.
+fn write_and_replace(
+    document: &mut Document,
+    file: File,
+    temporary: &Path,
+    path: &Path,
+) -> io::Result<()> {
+    // Writing a PDF means many small writes; `BufWriter` gathers them into
+    // a few big ones.
+    let mut writer = BufWriter::new(file);
+    document.save_to(&mut writer)?;
+    // `into_inner` writes out what is still in the buffer and hands the file
+    // back. Its error also carries the writer; `into_error` keeps only the
+    // `io::Error`, so `?` can return it.
+    let file = writer
+        .into_inner()
+        .map_err(io::IntoInnerError::into_error)?;
+    // `sync_all` waits until the bytes are really on the disk, not just in
+    // the system's memory. Without it, a power cut just after the rename
+    // could leave `path` naming a file that was never fully written.
+    file.sync_all()?;
+    // Close the file before the rename, so nothing holds it open while it
+    // takes the place of `path`.
+    drop(file);
+    fs::rename(temporary, path)
+}
+
+/// A free name for the temporary file, in the same folder as `path`.
+///
+/// The same folder matters: a rename only works within one file system, and
+/// another folder (like the system temp folder) may sit on another one.
+///
+/// For `merged.pdf` the name looks like `.merged.pdf.1234-0.tmp`. The leading
+/// dot hides it on Linux and macOS. The process id keeps two programs apart,
+/// and the counter keeps apart two saves in this one (tests run in parallel
+/// threads, for example).
+fn temporary_path_for(path: &Path) -> io::Result<PathBuf> {
+    // One counter for the whole program. `AtomicU64` can be shared by every
+    // thread without a lock, and `fetch_add` hands each caller its own value.
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the output path does not name a file",
+        )
+    })?;
+    // `Relaxed`: we only need each number to be different, not any order
+    // between threads.
+    let number = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    // A file name may not be valid text, so it is built as an `OsString`,
+    // not a `String`.
+    let mut temporary_name = OsString::from(".");
+    temporary_name.push(name);
+    temporary_name.push(format!(".{}-{number}.tmp", std::process::id()));
+    Ok(path.with_file_name(temporary_name))
 }
 
 fn load(path: &Path) -> Result<Document, MergeError> {

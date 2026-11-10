@@ -168,6 +168,17 @@ impl ScratchDir {
         self.0.join(name)
     }
 
+    /// The names of everything in this folder, sorted, so a test can check
+    /// that a merge left no stray file (such as a temporary one) behind.
+    fn entries(&self) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(&self.0)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Saves `document` into this folder as `name` and returns its path.
     fn save(&self, name: &str, mut document: Document) -> PathBuf {
         let path = self.file(name);
@@ -367,9 +378,141 @@ fn input_without_page_tree_is_broken() {
     let result = merge_documents(vec![with_pages("A", 1), no_tree]);
 
     assert!(
-        matches!(result, Err(MergeError::Broken { input: 2, .. })),
+        matches!(
+            result,
+            Err(MergeError::Broken {
+                input: 2,
+                reason: "it has no page tree"
+            })
+        ),
         "got {result:?}"
     );
+}
+
+#[test]
+fn input_without_catalog_is_broken() {
+    // Two ways to lose the catalog: the trailer does not name one, or it
+    // names an object that is not there.
+    let mut unnamed = with_pages("B", 1);
+    unnamed.trailer.remove(b"Root");
+    let mut missing = with_pages("B", 1);
+    let catalog_id = missing
+        .trailer
+        .get(b"Root")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    missing.objects.remove(&catalog_id);
+
+    for no_catalog in [unnamed, missing] {
+        let result = merge_documents(vec![with_pages("A", 1), no_catalog]);
+
+        assert!(
+            matches!(
+                result,
+                Err(MergeError::Broken {
+                    input: 2,
+                    reason: "it has no catalog"
+                })
+            ),
+            "got {result:?}"
+        );
+    }
+}
+
+#[test]
+fn input_with_empty_page_tree_is_broken() {
+    let mut empty = with_pages("B", 1);
+    let root_id = root_pages_id(&empty);
+    let root = empty.get_dictionary_mut(root_id).unwrap();
+    root.set("Kids", Vec::<Object>::new());
+    root.set("Count", 0);
+
+    let result = merge_documents(vec![with_pages("A", 1), empty]);
+
+    assert!(
+        matches!(
+            result,
+            Err(MergeError::Broken {
+                input: 2,
+                reason: "its page tree has no pages"
+            })
+        ),
+        "got {result:?}"
+    );
+}
+
+#[test]
+fn merged_version_is_the_newest_input_version() {
+    // The newest one sits in the middle, so taking the first or the last
+    // version by mistake would fail this test.
+    let versions = ["1.4", "1.7", "1.5"];
+    let documents = versions
+        .iter()
+        .map(|&version| {
+            let mut document = with_pages("A", 1);
+            document.version = version.to_owned();
+            document
+        })
+        .collect();
+
+    let merged = merge_documents(documents).unwrap();
+
+    assert_eq!(merged.version, "1.7");
+}
+
+#[test]
+fn output_may_be_one_of_the_inputs() {
+    let scratch = ScratchDir::new("output-is-input");
+    let a = scratch.save("a.pdf", with_pages("A", 2));
+    let b = scratch.save("b.pdf", with_pages("B", 1));
+
+    let page_count = merge_files(&[a.clone(), b], &a).unwrap();
+
+    assert_eq!(page_count, 3);
+    assert_eq!(markers(&Document::load(&a).unwrap()), ["A1", "A2", "B1"]);
+    assert_eq!(scratch.entries(), ["a.pdf", "b.pdf"]);
+}
+
+#[test]
+fn successful_save_leaves_no_temporary_file() {
+    let scratch = ScratchDir::new("no-leftovers");
+    let a = scratch.save("a.pdf", with_pages("A", 1));
+    let b = scratch.save("b.pdf", with_pages("B", 1));
+
+    merge_files(&[a, b], &scratch.file("merged.pdf")).unwrap();
+
+    assert_eq!(scratch.entries(), ["a.pdf", "b.pdf", "merged.pdf"]);
+}
+
+#[test]
+fn save_into_missing_folder_names_the_output() {
+    let scratch = ScratchDir::new("missing-folder");
+    let a = scratch.save("a.pdf", with_pages("A", 1));
+    let output = scratch.file("missing").join("merged.pdf");
+
+    match merge_files(&[a], &output) {
+        Err(MergeError::Save { path, .. }) => assert_eq!(path, output),
+        other => panic!("expected a save error, got {other:?}"),
+    }
+    assert_eq!(scratch.entries(), ["a.pdf"]);
+}
+
+#[test]
+fn failed_save_removes_its_temporary_file() {
+    // A folder already holds the output name. Writing the temporary file
+    // works, but putting it in the folder's place fails, so this is the case
+    // where there is a temporary file to clean up.
+    let scratch = ScratchDir::new("output-is-folder");
+    let a = scratch.save("a.pdf", with_pages("A", 1));
+    let output = scratch.file("taken");
+    fs::create_dir(&output).unwrap();
+
+    match merge_files(&[a], &output) {
+        Err(MergeError::Save { path, .. }) => assert_eq!(path, output),
+        other => panic!("expected a save error, got {other:?}"),
+    }
+    assert_eq!(scratch.entries(), ["a.pdf", "taken"]);
 }
 
 #[test]
