@@ -18,12 +18,21 @@ RUN rustup target add x86_64-pc-windows-gnu \
 # Run as a non-root user. UID/GID default to 1000 so that files written
 # into a bind-mounted checkout on Linux belong to the usual first user.
 # compose.yaml passes HOST_UID/HOST_GID here when they are set.
+#
+# The host's IDs may already be taken inside the Debian image (GID 100 is
+# "users", for example), and groupadd/useradd refuse duplicates by default:
+# - if a group with that GID exists, it is reused instead of creating one;
+# - --non-unique lets the user "builder" share its UID with an existing user.
+# Only the numbers matter for file ownership, not the names, so chown uses
+# the numbers too (a reused group is not called "builder").
 ARG UID=1000
 ARG GID=1000
-RUN groupadd --gid "${GID}" builder \
-    && useradd --uid "${UID}" --gid "${GID}" --create-home builder \
+RUN if ! getent group "${GID}" > /dev/null; then \
+        groupadd --gid "${GID}" builder; \
+    fi \
+    && useradd --uid "${UID}" --gid "${GID}" --non-unique --create-home builder \
     && mkdir -p /home/builder/.cargo /home/builder/target /workspace \
-    && chown builder:builder /home/builder/.cargo /home/builder/target /workspace
+    && chown "${UID}:${GID}" /home/builder/.cargo /home/builder/target /workspace
 
 # Downloaded crates and build output live outside the checkout, in named
 # volumes (compose.yaml): bind mounts on Docker Desktop for Windows are slow,

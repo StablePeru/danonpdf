@@ -66,4 +66,31 @@ mod tests {
         // start of an extension: ".pdf" is a hidden file called ".pdf".
         assert!(!is_pdf_path(Path::new(".pdf")));
     }
+
+    #[test]
+    fn trailing_dot_is_an_empty_extension() {
+        // "report." has an extension, but it is the empty string.
+        assert!(!is_pdf_path(Path::new("report.")));
+    }
+
+    #[test]
+    fn longer_extension_starting_with_pdf_is_not_pdf() {
+        // The whole extension must be "pdf", not merely start with it.
+        assert!(!is_pdf_path(Path::new("notes.pdfx")));
+    }
+
+    // Linux file names are bytes, not text, so they can be invalid UTF-8.
+    // Windows names are UTF-16 and are built differently, so this test only
+    // exists on Unix-like systems.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_file_name_with_pdf_extension_is_pdf() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        // 0xE9 is "é" in Latin-1, but on its own it is not valid UTF-8.
+        let name = OsStr::from_bytes(b"caf\xe9.pdf");
+        assert!(name.to_str().is_none(), "the name must not be valid UTF-8");
+        assert!(is_pdf_path(Path::new(name)));
+    }
 }

@@ -32,6 +32,12 @@ Downloaded crates and build output are kept in Docker volumes, not in the checko
 HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose build
 ```
 
+A named volume keeps the owner it had the first time it was used. If you change `HOST_UID` or `HOST_GID` later, remove the volumes once so they are created again with the new owner. This only deletes the downloaded crates and the build output, which the next build fetches and rebuilds:
+
+```sh
+docker compose down --volumes
+```
+
 ## Try merging from the command line
 
 The core comes with a small example program that merges PDF files. Put the PDFs somewhere inside the checkout (the container only sees the checkout, mounted at `/workspace`), then pass paths relative to the repository root, output first:

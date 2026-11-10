@@ -17,11 +17,10 @@ services:
       - cargo-home:/home/builder/.cargo
       - cargo-target:/home/builder/target
 
+# A named volume keeps the owner it got the first time it was used. After
+# changing HOST_UID/HOST_GID, remove them (docker compose down --volumes).
 volumes:
   cargo-home:
   cargo-target:
-# Usage: docker compose build
-#        docker compose run --rm build cargo fmt --all --check
-#        docker compose run --rm build cargo clippy --workspace --all-targets -- -D warnings
-#        docker compose run --rm build cargo test --workspace
-#        docker compose run --rm build bash scripts/build-windows.sh
+# The commands to build, check and test are listed in the README, under
+# "Build and test".

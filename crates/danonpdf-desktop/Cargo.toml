@@ -20,9 +20,17 @@ danonpdf-core.workspace = true
 # accesskit: lets screen readers read the window.
 # On Windows that is all winit needs; Linux adds its windowing systems below.
 eframe = { workspace = true, features = ["glow", "default_fonts", "accesskit"] }
+# On Windows rfd needs no feature: it always uses the system's own dialogs
+# (IFileDialog through COM, and MessageBoxW).
+rfd.workspace = true
 
 # winit refuses to compile on Linux without at least one windowing system.
 # Declaring the features in a target table keeps X11 and Wayland code out of
 # the Windows build.
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { workspace = true, features = ["x11", "wayland"] }
+# On Linux rfd needs exactly one backend. xdg-portal talks to the desktop's
+# own file chooser over D-Bus, and loads libdbus when a dialog opens instead
+# of linking it at build time, so the build image needs no GTK or D-Bus
+# development packages. (gtk3 would need libgtk-3-dev to build.)
+rfd = { workspace = true, features = ["xdg-portal"] }

@@ -11,7 +11,9 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-# The toolchain the Docker image builds and tests with.
+# The oldest Rust that may build DanonPDF; Cargo refuses older compilers.
+# The exact toolchain used for builds and tests is pinned by the image tag in
+# the Dockerfile.
 rust-version = "1.99"
 license = "GPL-3.0-only"
 repository = "https://github.com/StablePeru/danonpdf"
@@ -27,6 +29,10 @@ eframe = { version = "0.37", default-features = false }
 # default, chrono-clock, only converts PDF dates to and from chrono types,
 # which DanonPDF does not use, so it would be one more crate for nothing.
 lopdf = { version = "0.47", default-features = false, features = ["rayon"] }
+# Native file and message dialogs (MIT). Its defaults are Linux-only (the
+# xdg-desktop-portal backend and Wayland window parenting); the desktop crate
+# turns on what each platform needs.
+rfd = { version = "0.18", default-features = false }
 
 [profile.release]
 # Optimise across crate boundaries: slower to build, smaller and faster binary.
