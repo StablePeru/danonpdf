@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use eframe::egui;
 
-use crate::merge_list::{MergeList, RowAction, Status, display_name};
+use crate::merge_list::{MergeList, RowAction, SaveSuggestion, Status, display_name};
 use crate::texts;
 
 /// The whole app state. `Default` gives an empty list.
@@ -96,7 +96,7 @@ impl DanonPdfApp {
                     .on_hover_text(texts::MERGE_HINT)
                     .on_disabled_hover_text(texts::MERGE_NEEDS_TWO);
                 if merge.clicked()
-                    && let Some(output) = ask_output_path(frame, self.list.default_output_path())
+                    && let Some(output) = ask_output_path(frame, self.list.save_suggestion())
                 {
                     self.list.merge_into(output);
                 }
@@ -206,6 +206,11 @@ impl DanonPdfApp {
                 ui.label(texts::merged(*pages, &display_name(output)))
                     .on_hover_text(output.display().to_string());
             }
+            Status::OutputIsInput { output } => {
+                let color = ui.visuals().error_fg_color;
+                ui.colored_label(color, texts::output_is_input(&display_name(output)))
+                    .on_hover_text(output.display().to_string());
+            }
             Status::Failed { message } => {
                 let color = ui.visuals().error_fg_color;
                 ui.colored_label(color, texts::merge_failed(message));
@@ -232,27 +237,22 @@ fn pick_pdfs(frame: &eframe::Frame) -> Option<Vec<PathBuf>> {
 ///
 /// On Windows the dialog also asks before replacing an existing file, and
 /// adds ".pdf" when the user types a name without it (rfd sets the first
-/// filter's extension as the default one).
-fn ask_output_path(frame: &eframe::Frame, suggested: Option<PathBuf>) -> Option<PathBuf> {
+/// filter's extension as the default one). Whatever comes back, the list
+/// still refuses to write over one of its own files.
+fn ask_output_path(frame: &eframe::Frame, suggested: SaveSuggestion) -> Option<PathBuf> {
     let mut dialog = rfd::FileDialog::new()
         .set_title(texts::SAVE_DIALOG_TITLE)
         .add_filter(texts::PDF_FILTER, &["pdf"])
         .set_parent(frame);
 
     // The builder methods take the dialog by value and return it changed,
-    // so each optional step reassigns the variable.
-    if let Some(path) = suggested {
-        // A bare file name has an empty folder (""), which is not a place
-        // to open the dialog in; `filter` turns it into `None`.
-        if let Some(folder) = path
-            .parent()
-            .filter(|folder| !folder.as_os_str().is_empty())
-        {
-            dialog = dialog.set_directory(folder);
-        }
-        if let Some(name) = path.file_name() {
-            dialog = dialog.set_file_name(name.to_string_lossy());
-        }
+    // so each optional step reassigns the variable. Which steps apply was
+    // decided in `SaveSuggestion::for_path`, where it is tested.
+    if let Some(folder) = suggested.folder {
+        dialog = dialog.set_directory(folder);
+    }
+    if let Some(name) = suggested.file_name {
+        dialog = dialog.set_file_name(name);
     }
     dialog.save_file()
 }

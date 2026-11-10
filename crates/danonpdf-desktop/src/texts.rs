@@ -22,8 +22,21 @@ pub fn startup_error(error: &dyn Display) -> String {
     format!("DanonPDF could not open its window.\n\n{error}")
 }
 
-/// The file name the save dialog proposes for a merge.
+/// The file name the save dialog proposes for a merge, and the base of the
+/// numbered names that follow it.
 pub const DEFAULT_OUTPUT_NAME: &str = "merged.pdf";
+
+/// The `attempt`-th name to propose for a merge: "merged.pdf" first, then
+/// "merged (2).pdf", "merged (3).pdf"… The numbering copies what file
+/// managers do with copies, so it looks familiar.
+pub fn output_name(attempt: usize) -> String {
+    match attempt {
+        // 0 is not a real attempt; treat it as the first one rather than
+        // proposing a strange "merged (0).pdf".
+        0 | 1 => DEFAULT_OUTPUT_NAME.to_owned(),
+        _ => format!("merged ({attempt}).pdf"),
+    }
+}
 
 // Toolbar
 
@@ -65,7 +78,14 @@ pub fn files_in_list(count: usize) -> String {
 }
 
 /// Why some of the files just added are not in the list.
+///
+/// The list only reports skipped files when at least one count is above
+/// zero, but this function does not rely on it: with both at zero it still
+/// returns a whole sentence instead of "Skipped .".
 pub fn skipped(not_pdf: usize, duplicates: usize) -> String {
+    if not_pdf == 0 && duplicates == 0 {
+        return "Nothing was skipped.".to_owned();
+    }
     // Each part is a phrase, and the parts that apply are joined, so the
     // sentence never mentions a count of zero.
     let mut parts = Vec::new();
@@ -97,6 +117,15 @@ pub fn merge_failed(reason: &str) -> String {
     format!("Could not merge: {reason}")
 }
 
+/// A merge was refused because the chosen file is one of the inputs.
+/// `output_name` is the file name, without its folder.
+pub fn output_is_input(output_name: &str) -> String {
+    format!(
+        "Not merged: {output_name} is one of the files in the list. \
+         Choose another name, so that no file is replaced."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +137,28 @@ mod tests {
         assert_eq!(
             skipped(3, 1),
             "Skipped 3 files that are not PDFs and 1 file already in the list."
+        );
+    }
+
+    #[test]
+    fn skipped_with_nothing_skipped_is_still_a_sentence() {
+        assert_eq!(skipped(0, 0), "Nothing was skipped.");
+    }
+
+    #[test]
+    fn output_names_are_numbered_after_the_first() {
+        assert_eq!(output_name(1), "merged.pdf");
+        assert_eq!(output_name(2), "merged (2).pdf");
+        assert_eq!(output_name(10), "merged (10).pdf");
+        assert_eq!(output_name(0), "merged.pdf");
+    }
+
+    #[test]
+    fn output_is_input_names_the_file() {
+        assert_eq!(
+            output_is_input("a.pdf"),
+            "Not merged: a.pdf is one of the files in the list. \
+             Choose another name, so that no file is replaced."
         );
     }
 

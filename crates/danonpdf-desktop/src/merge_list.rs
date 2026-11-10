@@ -7,6 +7,7 @@
 //! reports clicks.
 
 use std::error::Error;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use danonpdf_core::{MergeError, is_pdf_path, merge_files};
@@ -43,6 +44,9 @@ pub enum Status {
     },
     /// The last merge worked.
     Merged { pages: usize, output: PathBuf },
+    /// The merge was refused because `output` is one of the files in the
+    /// list: writing there would replace a file before it is read.
+    OutputIsInput { output: PathBuf },
     /// The last merge failed. The message already holds the whole chain of
     /// causes, because `MergeError` cannot be cloned or kept around cheaply.
     Failed { message: String },
@@ -160,25 +164,54 @@ impl MergeList {
     }
 
     /// Where the save dialog proposes to write the result: `merged.pdf` in
-    /// the folder of the first file. `None` while the list is empty.
+    /// the folder of the first file, or `merged (2).pdf`, `merged (3).pdf`…
+    /// when that name is already one of the files in the list. `None` while
+    /// the list is empty.
+    ///
+    /// Proposing an input would be a trap: merge a and b into merged.pdf,
+    /// then merged.pdf with c, and one click on "replace" in the dialog
+    /// would overwrite a file that is still to be read.
     pub fn default_output_path(&self) -> Option<PathBuf> {
-        // `first()` is `None` for an empty list, and `map` only runs the
-        // closure when there is a value: no `if` and no unwrapping needed.
-        // `with_file_name` keeps the folder and swaps the name.
-        self.files
-            .first()
-            .map(|first| first.with_file_name(texts::DEFAULT_OUTPUT_NAME))
+        // `?` on an `Option` returns `None` from the whole function when the
+        // list is empty, so the rest only runs when there is a first file.
+        let first = self.files.first()?;
+        // `1..` counts up without end, and `find` stops at the first number
+        // whose path is free. It always stops: the list is finite, so it
+        // cannot hold every name. `with_file_name` keeps the folder and
+        // swaps the name.
+        (1..)
+            .map(|attempt| first.with_file_name(texts::output_name(attempt)))
+            .find(|candidate| !self.is_input(candidate))
+    }
+
+    /// What the save dialog starts with: the folder and file name of
+    /// [`Self::default_output_path`]. Empty while the list is empty.
+    pub fn save_suggestion(&self) -> SaveSuggestion {
+        self.default_output_path()
+            .map(|path| SaveSuggestion::for_path(&path))
+            .unwrap_or_default()
     }
 
     /// Merges the files into `output` and records the outcome in the status.
     /// Does nothing unless [`Self::can_merge`].
     ///
+    /// `output` gets ".pdf" added when it has no extension at all (see
+    /// [`with_pdf_extension`]). The merge is refused, and the core is never
+    /// called, when `output` is one of the files in the list.
+    ///
     /// This runs on the thread that draws the window, so the window does not
     /// answer until the merge ends: a moment for everyday files, but several
-    /// seconds for big scans. Moving the work to a background thread is a
-    /// later task (T8).
+    /// seconds for big scans. A later change will move merging to a
+    /// background thread.
     pub fn merge_into(&mut self, output: PathBuf) {
         if !self.can_merge() {
+            return;
+        }
+        // The extension first, so that typing "a" when "a.pdf" is in the
+        // list is caught by the check below.
+        let output = with_pdf_extension(output);
+        if self.is_input(&output) {
+            self.status = Status::OutputIsInput { output };
             return;
         }
         // `&self.files` lends the list to the core, which only reads it.
@@ -186,11 +219,19 @@ impl MergeList {
         self.record_merge(output, result);
     }
 
+    /// Whether `path` names one of the files in the list, however it is
+    /// spelled (see [`same_file`]).
+    fn is_input(&self, path: &Path) -> bool {
+        self.files.iter().any(|file| same_file(file, path))
+    }
+
     /// Records the outcome of a merge into `output`.
     ///
     /// Kept apart from [`Self::merge_into`] so that tests can feed it any
     /// outcome, including errors that are hard to cause with real files.
-    pub fn record_merge(&mut self, output: PathBuf, result: Result<usize, MergeError>) {
+    /// Private: the tests are a child module (`mod tests` below), and a
+    /// child module can see its parent's private items.
+    fn record_merge(&mut self, output: PathBuf, result: Result<usize, MergeError>) {
         self.status = match result {
             Ok(pages) => Status::Merged { pages, output },
             Err(error) => Status::Failed {
@@ -203,6 +244,74 @@ impl MergeList {
     /// or "skipped 1 file" line would describe a list that no longer exists.
     fn list_changed(&mut self) {
         self.status = Status::Idle;
+    }
+}
+
+/// Where the save dialog opens and the name it proposes.
+///
+/// rfd takes the folder and the file name separately. Splitting the path
+/// here, and not in the drawing code, keeps the rules about empty folders
+/// and odd names where they can be tested.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SaveSuggestion {
+    /// The folder to open the dialog in. `None` lets the system choose.
+    pub folder: Option<PathBuf>,
+    /// The name already typed in the dialog. `None` leaves it empty.
+    pub file_name: Option<String>,
+}
+
+impl SaveSuggestion {
+    /// Splits `path` into the folder to open and the name to propose.
+    pub fn for_path(path: &Path) -> Self {
+        // A bare file name such as "merged.pdf" has an empty folder (""),
+        // which is not a place to open the dialog in; `filter` turns it
+        // into `None`. `to_path_buf` copies the borrowed folder out.
+        let folder = path
+            .parent()
+            .filter(|folder| !folder.as_os_str().is_empty())
+            .map(Path::to_path_buf);
+        // rfd wants the name as text. `to_string_lossy` replaces bytes that
+        // are not valid UTF-8 with "�": good enough for a proposal the
+        // user can still edit.
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        Self { folder, file_name }
+    }
+}
+
+/// Whether `a` and `b` name the same file.
+///
+/// Comparing the paths as text is not enough: `docs/./a.pdf` and
+/// `docs/a.pdf` are the same file, and on Windows so are `C:\Docs\A.PDF`
+/// and `c:\docs\a.pdf`, because Windows ignores case in file names.
+/// `fs::canonicalize` asks the system for the one full path of each file,
+/// with `.`, `..` and links resolved and, on Windows, the case as stored on
+/// disk. The tests run on Linux, so they cover the first kind only; the
+/// case rule comes from Windows itself.
+///
+/// `canonicalize` fails for a path that does not exist. Then the paths are
+/// compared as given: a file that does not exist yet cannot be one of the
+/// inputs anyway, since the merge needs to read every input.
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// `path` with ".pdf" added when its file name has no extension at all.
+///
+/// The Windows save dialog adds ".pdf" itself, but the Linux file chooser
+/// returns the name exactly as typed, and a merged PDF called "report" is
+/// hard to open with a double click. A name with another extension
+/// ("report.txt") is left as the user typed it: that looks deliberate.
+pub fn with_pdf_extension(path: PathBuf) -> PathBuf {
+    if path.extension().is_none() {
+        // `with_extension` builds a new path; the old one is dropped.
+        path.with_extension("pdf")
+    } else {
+        path
     }
 }
 

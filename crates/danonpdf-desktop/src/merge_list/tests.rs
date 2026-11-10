@@ -221,12 +221,73 @@ fn default_output_is_merged_pdf_next_to_the_first_file() {
 }
 
 #[test]
+fn default_output_never_proposes_a_file_already_in_the_list() {
+    // Merging a+b into merged.pdf and then merging merged.pdf with c must
+    // not propose merged.pdf again: that would replace one of the inputs.
+    let list = list_of(&["merged.pdf", "c.pdf"]);
+    assert_eq!(list.default_output_path(), Some(doc("merged (2).pdf")));
+
+    let list = list_of(&["merged.pdf", "merged (2).pdf"]);
+    assert_eq!(list.default_output_path(), Some(doc("merged (3).pdf")));
+}
+
+#[test]
+fn a_merged_pdf_in_another_folder_does_not_change_the_default() {
+    let mut list = list_of(&["a.pdf"]);
+    list.add([Path::new("elsewhere").join("merged.pdf")]);
+    assert_eq!(list.default_output_path(), Some(doc("merged.pdf")));
+}
+
+#[test]
 fn default_output_for_a_bare_file_name_is_a_bare_name() {
     let mut list = MergeList::default();
     list.add([PathBuf::from("a.pdf")]);
     assert_eq!(
         list.default_output_path(),
         Some(PathBuf::from("merged.pdf"))
+    );
+}
+
+#[test]
+fn save_suggestion_splits_folder_and_name() {
+    let list = list_of(&["a.pdf", "b.pdf"]);
+    assert_eq!(
+        list.save_suggestion(),
+        SaveSuggestion {
+            folder: Some(PathBuf::from("docs")),
+            file_name: Some("merged.pdf".to_owned()),
+        }
+    );
+}
+
+#[test]
+fn save_suggestion_for_an_empty_list_is_empty() {
+    assert_eq!(
+        MergeList::default().save_suggestion(),
+        SaveSuggestion::default()
+    );
+}
+
+#[test]
+fn save_suggestion_for_a_bare_name_has_no_folder() {
+    // An empty folder ("") is not a place to open a dialog in.
+    assert_eq!(
+        SaveSuggestion::for_path(Path::new("merged.pdf")),
+        SaveSuggestion {
+            folder: None,
+            file_name: Some("merged.pdf".to_owned()),
+        }
+    );
+}
+
+#[test]
+fn save_suggestion_for_a_path_without_a_name_has_no_name() {
+    assert_eq!(
+        SaveSuggestion::for_path(Path::new("..")),
+        SaveSuggestion {
+            folder: None,
+            file_name: None,
+        }
     );
 }
 
@@ -308,6 +369,131 @@ fn save_one_page_pdf(path: &Path) {
     let catalog_id = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
     document.trailer.set("Root", catalog_id);
     document.save(path).unwrap();
+}
+
+/// An empty folder of its own for one test.
+///
+/// Tests run in parallel threads of the same process, so the folder name
+/// carries the test's own `name` as well as the process id: two tests never
+/// share (or delete) each other's files.
+fn fresh_folder(name: &str) -> PathBuf {
+    let folder =
+        std::env::temp_dir().join(format!("danonpdf-desktop-{name}-{}", std::process::id()));
+    // Left over from an earlier run that stopped half way; no error if not.
+    let _ = fs::remove_dir_all(&folder);
+    fs::create_dir_all(&folder).unwrap();
+    folder
+}
+
+/// A list with two real one-page PDFs, `a.pdf` and `b.pdf`, in `folder`.
+fn list_of_two_real_pdfs(folder: &Path) -> MergeList {
+    let (first, second) = (folder.join("a.pdf"), folder.join("b.pdf"));
+    save_one_page_pdf(&first);
+    save_one_page_pdf(&second);
+    let mut list = MergeList::default();
+    list.add([first, second]);
+    list
+}
+
+#[test]
+fn merge_into_never_overwrites_one_of_the_inputs() {
+    let folder = fresh_folder("output-is-input");
+    let mut list = list_of_two_real_pdfs(&folder);
+    let before = fs::read(folder.join("a.pdf")).unwrap();
+
+    // The same file as the first input, spelled differently.
+    list.merge_into(folder.join(".").join("a.pdf"));
+    let after = fs::read(folder.join("a.pdf")).unwrap();
+    let status = list.status().clone();
+    fs::remove_dir_all(&folder).unwrap();
+
+    assert_eq!(before, after, "the input file was changed");
+    assert_eq!(
+        status,
+        Status::OutputIsInput {
+            output: folder.join(".").join("a.pdf")
+        }
+    );
+}
+
+#[test]
+fn merge_into_refuses_a_name_that_becomes_an_input_once_pdf_is_added() {
+    // Typing "b" in the Linux file chooser means "b.pdf", which is an input.
+    let folder = fresh_folder("becomes-input");
+    let mut list = list_of_two_real_pdfs(&folder);
+    list.merge_into(folder.join("b"));
+    let status = list.status().clone();
+    fs::remove_dir_all(&folder).unwrap();
+
+    assert_eq!(
+        status,
+        Status::OutputIsInput {
+            output: folder.join("b.pdf")
+        }
+    );
+}
+
+#[test]
+fn same_file_sees_through_different_spellings() {
+    let folder = fresh_folder("same-file");
+    let file = folder.join("a.pdf");
+    fs::write(&file, b"not really a pdf").unwrap();
+    fs::write(folder.join("b.pdf"), b"another").unwrap();
+
+    let dotted = folder.join(".").join("a.pdf");
+    let up_and_back = folder
+        .join("..")
+        .join(folder.file_name().unwrap())
+        .join("a.pdf");
+    let results = (
+        same_file(&file, &dotted),
+        same_file(&file, &up_and_back),
+        same_file(&file, &folder.join("b.pdf")),
+    );
+    fs::remove_dir_all(&folder).unwrap();
+
+    assert_eq!(results, (true, true, false));
+}
+
+#[test]
+fn same_file_compares_paths_that_do_not_exist_as_given() {
+    // Nothing is on disk here, so the system cannot help: equal text means
+    // the same file, and different text means different files.
+    assert!(same_file(&doc("a.pdf"), &doc("a.pdf")));
+    assert!(!same_file(&doc("a.pdf"), &doc("b.pdf")));
+}
+
+#[test]
+fn a_missing_output_is_never_the_same_as_an_existing_input() {
+    let folder = fresh_folder("missing-output");
+    let input = folder.join("a.pdf");
+    fs::write(&input, b"x").unwrap();
+    let result = same_file(&input, &folder.join("new.pdf"));
+    fs::remove_dir_all(&folder).unwrap();
+
+    assert!(!result);
+}
+
+#[test]
+fn with_pdf_extension_adds_pdf_only_when_there_is_no_extension() {
+    assert_eq!(with_pdf_extension(doc("report")), doc("report.pdf"));
+    assert_eq!(with_pdf_extension(doc("report.pdf")), doc("report.pdf"));
+    assert_eq!(with_pdf_extension(doc("report.PDF")), doc("report.PDF"));
+    // Another extension looks deliberate, so it stays as typed.
+    assert_eq!(with_pdf_extension(doc("report.txt")), doc("report.txt"));
+}
+
+#[test]
+fn merge_into_adds_pdf_to_a_name_without_an_extension() {
+    let folder = fresh_folder("no-extension");
+    let mut list = list_of_two_real_pdfs(&folder);
+    list.merge_into(folder.join("out"));
+    let with_pdf = folder.join("out.pdf").exists();
+    let without = folder.join("out").exists();
+    fs::remove_dir_all(&folder).unwrap();
+
+    assert!(with_pdf, "out.pdf was not written");
+    assert!(!without, "a file called just `out` was written");
 }
 
 #[test]
