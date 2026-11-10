@@ -1,0 +1,27 @@
+services:
+  build:
+    build:
+      context: .
+      args:
+        # The non-root user in the image. On Linux, match your own user so the
+        # bind-mounted checkout stays writable:
+        #   HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose build build
+        # (bash keeps UID read-only, hence the HOST_ prefix.)
+        UID: ${HOST_UID:-1000}
+        GID: ${HOST_GID:-1000}
+    image: danonpdf-build:local
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      # Crate registry and build output: see the comment in the Dockerfile.
+      - cargo-home:/home/builder/.cargo
+      - cargo-target:/home/builder/target
+
+volumes:
+  cargo-home:
+  cargo-target:
+# Usage: docker compose build
+#        docker compose run --rm build cargo fmt --all --check
+#        docker compose run --rm build cargo clippy --workspace --all-targets -- -D warnings
+#        docker compose run --rm build cargo test --workspace
+#        docker compose run --rm build bash scripts/build-windows.sh

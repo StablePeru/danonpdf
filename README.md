@@ -1,0 +1,45 @@
+# DanonPDF
+
+DanonPDF will be a free, fast desktop tool for everyday PDF work: merge, split, rotate, reorder and delete pages with thumbnails, compress, and turn images into PDF. Windows first, Linux later. It is part of DanonAA.
+
+> **Status:** only a skeleton. The app opens an empty window with its name and version. None of the PDF tools exist yet.
+
+## Why local
+
+Many people upload contracts, payslips, invoices and scans of their ID to unknown "free PDF" websites, with no idea what happens to those files afterwards. DanonPDF does the same jobs on your own computer:
+
+- no network connections;
+- no telemetry;
+- no accounts and no ads.
+
+## Build and test
+
+Everything runs in Docker, so the only thing you need installed is Docker with Compose. From the repository root:
+
+```sh
+docker compose build
+docker compose run --rm build cargo fmt --all --check
+docker compose run --rm build cargo clippy --workspace --all-targets -- -D warnings
+docker compose run --rm build cargo test --workspace
+docker compose run --rm build bash scripts/build-windows.sh
+```
+
+The last command cross-compiles the Windows app and leaves it at `dist/danonpdf.exe`. Run that file on Windows: a window does not open from inside a container.
+
+Downloaded crates and build output are kept in Docker volumes, not in the checkout. On Linux, build the image with your own user so the files the container writes stay yours:
+
+```sh
+HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose build
+```
+
+## Layout
+
+| Path | What it is |
+| --- | --- |
+| `crates/danonpdf-core` | The PDF logic, with no user interface. All the tests live here. |
+| `crates/danonpdf-desktop` | The desktop app (`danonpdf`), built with [egui](https://github.com/emilk/egui). It only draws and calls the core. |
+| `scripts/build-windows.sh` | Builds `dist/danonpdf.exe`. |
+
+## License
+
+[GPL-3.0](LICENSE).

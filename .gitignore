@@ -1,0 +1,17 @@
+# Cargo build output (inside Docker it goes to a named volume instead)
+/target/
+
+# Windows build (scripts/build-windows.sh)
+/dist/
+
+# Editors
+.idea/
+.vscode/
+.fleet/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

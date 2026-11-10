@@ -1,0 +1,28 @@
+[package]
+name = "danonpdf-desktop"
+description = "DanonPDF desktop app: a fast, local PDF tool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The crate is called danonpdf-desktop, but the program people run is
+# danonpdf (danonpdf.exe on Windows).
+[[bin]]
+name = "danonpdf"
+path = "src/main.rs"
+
+[dependencies]
+danonpdf-core.workspace = true
+# glow: draw with OpenGL instead of the default wgpu (see the root Cargo.toml).
+# default_fonts: egui's bundled fonts, so text shows up without system fonts.
+# accesskit: lets screen readers read the window.
+# On Windows that is all winit needs; Linux adds its windowing systems below.
+eframe = { workspace = true, features = ["glow", "default_fonts", "accesskit"] }
+
+# winit refuses to compile on Linux without at least one windowing system.
+# Declaring the features in a target table keeps X11 and Wayland code out of
+# the Windows build.
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { workspace = true, features = ["x11", "wayland"] }

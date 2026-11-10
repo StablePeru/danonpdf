@@ -1,0 +1,3 @@
+# The build image copies nothing from the repository: the source is
+# bind-mounted at run time. Keep the build context empty.
+*

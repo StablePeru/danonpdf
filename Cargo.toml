@@ -1,0 +1,33 @@
+[workspace]
+# Two crates: a core that only knows about PDF (no GUI, all the tests) and a
+# desktop app that only draws and calls the core. Keeping them apart means a
+# command-line tool or a different GUI can reuse the core untouched.
+members = ["crates/danonpdf-core", "crates/danonpdf-desktop"]
+# Resolver "3" is the default for edition 2024; it is spelled out because a
+# virtual workspace (no [package] here) does not pick it up from an edition.
+resolver = "3"
+
+# Shared metadata: each crate opts in with `version.workspace = true` etc.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# The toolchain the Docker image builds and tests with.
+rust-version = "1.99"
+license = "GPL-3.0-only"
+repository = "https://github.com/StablePeru/danonpdf"
+
+# Dependency versions live here once, so both crates always agree.
+[workspace.dependencies]
+danonpdf-core = { path = "crates/danonpdf-core" }
+# The defaults would pull in wgpu, which does not cross-compile to
+# x86_64-pc-windows-gnu (gfx-rs/wgpu#8303). Each crate picks its features.
+eframe = { version = "0.37", default-features = false }
+
+[profile.release]
+# Optimise across crate boundaries: slower to build, smaller and faster binary.
+lto = true
+# One code generation unit lets LLVM see the whole crate at once, for the
+# same trade-off.
+codegen-units = 1
+# Drop debug symbols from the shipped .exe.
+strip = true
