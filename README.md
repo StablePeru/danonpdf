@@ -2,7 +2,7 @@
 
 DanonPDF will be a free, fast desktop tool for everyday PDF work: merge, split, rotate, reorder and delete pages with thumbnails, compress, and turn images into PDF. Windows first, Linux later. It is part of DanonAA.
 
-> **Status:** only a skeleton. The app opens an empty window with its name and version. None of the PDF tools exist yet.
+> **Status:** early work. The core can merge PDF files, but the app has no button for it yet: it opens an empty window with its name and version. Merging can be tried from the command line (see below). The other tools do not exist yet.
 
 ## Why local
 
@@ -32,11 +32,22 @@ Downloaded crates and build output are kept in Docker volumes, not in the checko
 HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose build
 ```
 
+## Try merging from the command line
+
+The core comes with a small example program that merges PDF files. Put the PDFs somewhere inside the checkout (the container only sees the checkout, mounted at `/workspace`), then pass paths relative to the repository root, output first:
+
+```sh
+docker compose run --rm build cargo run --release --example merge -- merged.pdf first.pdf second.pdf
+```
+
+It prints how many pages it wrote, or why it could not merge. Bookmarks, named destinations, form fields and the tagged structure of the inputs are not carried over yet.
+
 ## Layout
 
 | Path | What it is |
 | --- | --- |
 | `crates/danonpdf-core` | The PDF logic, with no user interface. All the tests live here. |
+| `crates/danonpdf-core/examples/merge.rs` | The command-line merge example above. |
 | `crates/danonpdf-desktop` | The desktop app (`danonpdf`), built with [egui](https://github.com/emilk/egui). It only draws and calls the core. |
 | `scripts/build-windows.sh` | Builds `dist/danonpdf.exe`. |
 

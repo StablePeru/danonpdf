@@ -22,6 +22,11 @@ danonpdf-core = { path = "crates/danonpdf-core" }
 # The defaults would pull in wgpu, which does not cross-compile to
 # x86_64-pc-windows-gnu (gfx-rs/wgpu#8303). Each crate picks its features.
 eframe = { version = "0.37", default-features = false }
+# Reads and writes PDF in pure Rust (MIT). Of its default features only rayon
+# is kept: it parses the objects of a big file on every CPU core. The other
+# default, chrono-clock, only converts PDF dates to and from chrono types,
+# which DanonPDF does not use, so it would be one more crate for nothing.
+lopdf = { version = "0.47", default-features = false, features = ["rayon"] }
 
 [profile.release]
 # Optimise across crate boundaries: slower to build, smaller and faster binary.
