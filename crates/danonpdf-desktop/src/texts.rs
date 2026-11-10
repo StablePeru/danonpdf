@@ -29,12 +29,22 @@ pub const DEFAULT_OUTPUT_NAME: &str = "merged.pdf";
 /// The `attempt`-th name to propose for a merge: "merged.pdf" first, then
 /// "merged (2).pdf", "merged (3).pdf"… The numbering copies what file
 /// managers do with copies, so it looks familiar.
+///
+/// The numbered names are built from [`DEFAULT_OUTPUT_NAME`], so renaming
+/// that one constant (in a translation, say) renames them all.
 pub fn output_name(attempt: usize) -> String {
     match attempt {
         // 0 is not a real attempt; treat it as the first one rather than
         // proposing a strange "merged (0).pdf".
         0 | 1 => DEFAULT_OUTPUT_NAME.to_owned(),
-        _ => format!("merged ({attempt}).pdf"),
+        // `rsplit_once` cuts at the last dot: ("merged", "pdf"). The number
+        // goes between the two parts, before the extension, so the file
+        // still opens as a PDF.
+        _ => match DEFAULT_OUTPUT_NAME.rsplit_once('.') {
+            Some((stem, extension)) => format!("{stem} ({attempt}).{extension}"),
+            // A name without a dot has nothing to keep at the end.
+            None => format!("{DEFAULT_OUTPUT_NAME} ({attempt})"),
+        },
     }
 }
 
@@ -126,6 +136,16 @@ pub fn output_is_input(output_name: &str) -> String {
     )
 }
 
+/// A merge was refused because ".pdf" was added to the typed name and a file
+/// with that name already exists. `output_name` is the name with ".pdf",
+/// without its folder.
+pub fn exists_after_adding_extension(output_name: &str) -> String {
+    format!(
+        "Not merged: {output_name} already exists. \
+         Choose it in the dialog if you want to replace it."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,11 +174,29 @@ mod tests {
     }
 
     #[test]
+    fn numbered_output_names_come_from_the_default_name() {
+        // Whatever the default name is, the numbered ones share its start and
+        // its extension, so changing the constant changes every proposal.
+        let (stem, extension) = DEFAULT_OUTPUT_NAME.rsplit_once('.').unwrap();
+        assert_eq!(output_name(1), DEFAULT_OUTPUT_NAME);
+        assert_eq!(output_name(2), format!("{stem} (2).{extension}"));
+    }
+
+    #[test]
     fn output_is_input_names_the_file() {
         assert_eq!(
             output_is_input("a.pdf"),
             "Not merged: a.pdf is one of the files in the list. \
              Choose another name, so that no file is replaced."
+        );
+    }
+
+    #[test]
+    fn exists_after_adding_extension_names_the_file() {
+        assert_eq!(
+            exists_after_adding_extension("report.pdf"),
+            "Not merged: report.pdf already exists. \
+             Choose it in the dialog if you want to replace it."
         );
     }
 

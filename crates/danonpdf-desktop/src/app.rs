@@ -211,6 +211,14 @@ impl DanonPdfApp {
                 ui.colored_label(color, texts::output_is_input(&display_name(output)))
                     .on_hover_text(output.display().to_string());
             }
+            Status::ExistsAfterAddingExtension { output } => {
+                let color = ui.visuals().error_fg_color;
+                ui.colored_label(
+                    color,
+                    texts::exists_after_adding_extension(&display_name(output)),
+                )
+                .on_hover_text(output.display().to_string());
+            }
             Status::Failed { message } => {
                 let color = ui.visuals().error_fg_color;
                 ui.colored_label(color, texts::merge_failed(message));

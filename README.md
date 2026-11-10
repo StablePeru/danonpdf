@@ -8,7 +8,7 @@ DanonPDF will be a free, fast desktop tool for everyday PDF work: merge, split, 
 
 1. Drag PDF files from the file explorer onto the window, or click **Add PDFs…**. Files that are not PDFs, and files already in the list, are left out, and the line at the bottom says so.
 2. Put them in order with **Up** and **Down**, and take out any with **Remove** (the file itself is not touched). **Clear** empties the list.
-3. Click **Merge…** and choose where to save. It proposes `merged.pdf` next to the first file, or `merged (2).pdf` and so on when that name is already in the list. It never writes over one of the files being merged. The line at the bottom then says how many pages were written, or why the merge failed.
+3. Click **Merge…** and choose where to save. It proposes `merged.pdf` next to the first file, or `merged (2).pdf` and so on when that name is already in the list. It refuses to write over one of the files being merged (a hard link to one of them is not recognised). If you type a name without `.pdf`, it adds `.pdf`, and it does not merge when a file with that name already exists: choose that file in the dialog to replace it. The line at the bottom then says how many pages were written, or why the merge failed.
 
 The merge runs while the window waits, so with very big files the window may stop answering for a few seconds. Bookmarks, named destinations, form fields and the tagged structure of the inputs are not carried over yet.
 

@@ -47,6 +47,13 @@ pub enum Status {
     /// The merge was refused because `output` is one of the files in the
     /// list: writing there would replace a file before it is read.
     OutputIsInput { output: PathBuf },
+    /// The merge was refused because ".pdf" had to be added to the name the
+    /// user typed, and `output` (the name with ".pdf") already exists.
+    ///
+    /// The save dialog only asks "replace?" for the name it returns. On Linux
+    /// that is the name as typed ("report"), so nobody confirmed replacing
+    /// "report.pdf"; writing there would destroy an unrelated file silently.
+    ExistsAfterAddingExtension { output: PathBuf },
     /// The last merge failed. The message already holds the whole chain of
     /// causes, because `MergeError` cannot be cloned or kept around cheaply.
     Failed { message: String },
@@ -197,7 +204,8 @@ impl MergeList {
     ///
     /// `output` gets ".pdf" added when it has no extension at all (see
     /// [`with_pdf_extension`]). The merge is refused, and the core is never
-    /// called, when `output` is one of the files in the list.
+    /// called, when `output` is one of the files in the list, or when ".pdf"
+    /// was added and a file with the new name already exists.
     ///
     /// This runs on the thread that draws the window, so the window does not
     /// answer until the merge ends: a moment for everyday files, but several
@@ -208,10 +216,22 @@ impl MergeList {
             return;
         }
         // The extension first, so that typing "a" when "a.pdf" is in the
-        // list is caught by the check below.
+        // list is caught by the checks below. The typed name is kept (a
+        // `clone` of a short path costs next to nothing) to tell whether
+        // `with_pdf_extension` changed it, without repeating its rule here.
+        let typed = output.clone();
         let output = with_pdf_extension(output);
         if self.is_input(&output) {
             self.status = Status::OutputIsInput { output };
+            return;
+        }
+        // The dialog asked "replace?" only for the name it returned. When
+        // that name was changed, an existing file under the new name was
+        // never confirmed, so refuse instead of replacing it silently. On
+        // Windows the dialog adds ".pdf" itself, so this only fires on
+        // systems whose dialog returns the name as typed, such as Linux.
+        if output != typed && output.exists() {
+            self.status = Status::ExistsAfterAddingExtension { output };
             return;
         }
         // `&self.files` lends the list to the core, which only reads it.
@@ -293,6 +313,19 @@ impl SaveSuggestion {
 /// `canonicalize` fails for a path that does not exist. Then the paths are
 /// compared as given: a file that does not exist yet cannot be one of the
 /// inputs anyway, since the merge needs to read every input.
+///
+/// Known limits, accepted for now:
+///
+/// - A hard link is a second name for the same data, with its own path.
+///   `canonicalize` gives each name its own path, so a hard link to an
+///   input is not recognised as that input.
+/// - `canonicalize` can also fail for a file that does exist, for example
+///   when a folder on the way cannot be read. The paths are then compared
+///   as given too, so another spelling of the same file slips through.
+///
+/// Catching both would mean comparing file identities (device and inode on
+/// Linux, volume and file index on Windows), which std does not offer in a
+/// portable way.
 pub fn same_file(a: &Path, b: &Path) -> bool {
     match (fs::canonicalize(a), fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
@@ -306,6 +339,14 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
 /// returns the name exactly as typed, and a merged PDF called "report" is
 /// hard to open with a double click. A name with another extension
 /// ("report.txt") is left as the user typed it: that looks deliberate.
+///
+/// "Has an extension" follows std's [`Path::extension`], which can surprise:
+///
+/// - "v1.2 notes" has one ("2 notes", everything after the last dot), so it
+///   stays as typed.
+/// - ".report" has none (a leading dot starts a hidden name), so it becomes
+///   ".report.pdf".
+/// - "report." has an empty one, which still counts, so it stays as typed.
 pub fn with_pdf_extension(path: PathBuf) -> PathBuf {
     if path.extension().is_none() {
         // `with_extension` builds a new path; the old one is dropped.

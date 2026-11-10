@@ -484,6 +484,66 @@ fn with_pdf_extension_adds_pdf_only_when_there_is_no_extension() {
 }
 
 #[test]
+fn with_pdf_extension_follows_the_std_rule_for_odd_names() {
+    // For std, everything after the last dot is the extension: "2 notes"
+    // here. So this name counts as having one and stays as typed.
+    assert_eq!(with_pdf_extension(doc("v1.2 notes")), doc("v1.2 notes"));
+    // A leading dot starts a hidden name, not an extension.
+    assert_eq!(with_pdf_extension(doc(".report")), doc(".report.pdf"));
+    // A trailing dot gives an empty extension, which is still "some".
+    assert_eq!(with_pdf_extension(doc("report.")), doc("report."));
+}
+
+#[test]
+fn merge_into_does_not_replace_a_file_named_only_by_the_added_extension() {
+    // On Linux the dialog asked about "report", which did not exist, so
+    // nobody agreed to replace the unrelated "report.pdf".
+    let folder = fresh_folder("added-extension-exists");
+    let mut list = list_of_two_real_pdfs(&folder);
+    let existing = folder.join("report.pdf");
+    fs::write(&existing, b"someone else's report").unwrap();
+
+    list.merge_into(folder.join("report"));
+    let after = fs::read(&existing).unwrap();
+    let bare_written = folder.join("report").exists();
+    let status = list.status().clone();
+    fs::remove_dir_all(&folder).unwrap();
+
+    assert_eq!(after, b"someone else's report", "report.pdf was replaced");
+    assert!(!bare_written, "a file called just `report` was written");
+    assert_eq!(
+        status,
+        Status::ExistsAfterAddingExtension {
+            output: folder.join("report.pdf")
+        }
+    );
+}
+
+#[test]
+fn merge_into_replaces_an_existing_file_chosen_by_its_full_name() {
+    // The dialog asked "replace report.pdf?" for this exact name and the
+    // user said yes, so the merge goes ahead.
+    let folder = fresh_folder("full-name-exists");
+    let mut list = list_of_two_real_pdfs(&folder);
+    let existing = folder.join("report.pdf");
+    fs::write(&existing, b"old report").unwrap();
+
+    list.merge_into(existing.clone());
+    let after = fs::read(&existing).unwrap();
+    let status = list.status().clone();
+    fs::remove_dir_all(&folder).unwrap();
+
+    assert_ne!(after, b"old report", "report.pdf was not replaced");
+    assert_eq!(
+        status,
+        Status::Merged {
+            pages: 2,
+            output: existing
+        }
+    );
+}
+
+#[test]
 fn merge_into_adds_pdf_to_a_name_without_an_extension() {
     let folder = fresh_folder("no-extension");
     let mut list = list_of_two_real_pdfs(&folder);
