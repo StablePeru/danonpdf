@@ -4,9 +4,13 @@
 // while developing.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app;
+mod merge_list;
 mod texts;
 
 use eframe::egui;
+
+use app::DanonPdfApp;
 
 // `main` returns a Result so that a failure to open the window (for example,
 // no usable OpenGL driver) ends the program with an error code instead of a
@@ -14,14 +18,31 @@ use eframe::egui;
 // also shown in a native message box: otherwise a double-click would seem to
 // do nothing at all.
 fn main() -> eframe::Result {
-    let options = eframe::NativeOptions::default();
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            // Cargo sets CARGO_PKG_VERSION at compile time from Cargo.toml,
+            // so the version in the title can never drift from the real one.
+            .with_title(format!("{} {}", texts::APP_NAME, env!("CARGO_PKG_VERSION")))
+            .with_inner_size([600.0, 420.0])
+            .with_min_inner_size([420.0, 260.0])
+            // Already the default; written out because the app depends on
+            // it. On Windows it makes winit call OleInitialize, which puts
+            // this thread in a single-threaded COM apartment. rfd's file
+            // dialogs ask for that same kind of apartment, so the two agree.
+            // A crate that wanted a multithreaded apartment on this thread
+            // would make winit panic when the window opens.
+            .with_drag_and_drop(true),
+        // `..` fills every other field from the default options.
+        ..Default::default()
+    };
+
     let result = eframe::run_native(
-        // The window title.
+        // Names the app (for example, where egui could keep its settings).
         texts::APP_NAME,
         options,
         // eframe calls this once, after the window exists, to build the app
         // state. `Box` because eframe stores apps of any type behind a pointer.
-        Box::new(|_creation_context| Ok(Box::new(DanonPdfApp))),
+        Box::new(|_creation_context| Ok(Box::new(DanonPdfApp::default()))),
     );
 
     // `if let` runs the block only when the pattern matches: here, only when
@@ -44,23 +65,4 @@ fn show_startup_error(error: &eframe::Error) {
         .set_description(texts::startup_error(error))
         .set_buttons(rfd::MessageButtons::Ok)
         .show();
-}
-
-/// The application state. Empty for now: the skeleton only shows its name.
-struct DanonPdfApp;
-
-impl eframe::App for DanonPdfApp {
-    // egui is an immediate-mode GUI: this runs on every frame and describes
-    // the whole window from scratch, instead of building widgets once and
-    // updating them later.
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // The `ui` eframe hands over has no margin or background; the
-        // central panel adds both.
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.heading(texts::APP_NAME);
-            // Cargo sets CARGO_PKG_VERSION at compile time from Cargo.toml,
-            // so the version shown can never drift from the real one.
-            ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
-        });
-    }
 }

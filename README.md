@@ -2,7 +2,15 @@
 
 DanonPDF will be a free, fast desktop tool for everyday PDF work: merge, split, rotate, reorder and delete pages with thumbnails, compress, and turn images into PDF. Windows first, Linux later. It is part of DanonAA.
 
-> **Status:** early work. The core can merge PDF files, but the app has no button for it yet: it opens an empty window with its name and version. Merging can be tried from the command line (see below). The other tools do not exist yet.
+> **Status:** early work. The app can merge PDF files. The other tools do not exist yet.
+
+## Merging PDFs
+
+1. Drag PDF files from the file explorer onto the window, or click **Add PDFs…**. Files that are not PDFs, and files already in the list, are left out, and the line at the bottom says so.
+2. Put them in order with **Up** and **Down**, and take out any with **Remove** (the file itself is not touched). **Clear** empties the list.
+3. Click **Merge…** and choose where to save. It proposes `merged.pdf` next to the first file. The line at the bottom then says how many pages were written, or why the merge failed.
+
+The merge runs while the window waits, so with very big files the window may stop answering for a few seconds. Bookmarks, named destinations, form fields and the tagged structure of the inputs are not carried over yet.
 
 ## Why local
 
@@ -46,15 +54,18 @@ The core comes with a small example program that merges PDF files. Put the PDFs 
 docker compose run --rm build cargo run --release --example merge -- merged.pdf first.pdf second.pdf
 ```
 
-It prints how many pages it wrote, or why it could not merge. Bookmarks, named destinations, form fields and the tagged structure of the inputs are not carried over yet.
+It prints how many pages it wrote, or why it could not merge.
 
 ## Layout
 
 | Path | What it is |
 | --- | --- |
-| `crates/danonpdf-core` | The PDF logic, with no user interface. All the tests live here. |
+| `crates/danonpdf-core` | The PDF logic, with no user interface. |
 | `crates/danonpdf-core/examples/merge.rs` | The command-line merge example above. |
-| `crates/danonpdf-desktop` | The desktop app (`danonpdf`), built with [egui](https://github.com/emilk/egui). It only draws and calls the core. |
+| `crates/danonpdf-desktop` | The desktop app (`danonpdf`), built with [egui](https://github.com/emilk/egui). |
+| `crates/danonpdf-desktop/src/merge_list.rs` | The merge window's state and rules, tested without a window. |
+| `crates/danonpdf-desktop/src/app.rs` | Draws the window and turns clicks and dropped files into calls on that state. |
+| `crates/danonpdf-desktop/src/texts.rs` | Every text the user sees, ready for a translation. |
 | `scripts/build-windows.sh` | Builds `dist/danonpdf.exe`. |
 
 ## License

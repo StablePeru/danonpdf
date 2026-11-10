@@ -34,3 +34,7 @@ eframe = { workspace = true, features = ["x11", "wayland"] }
 # of linking it at build time, so the build image needs no GTK or D-Bus
 # development packages. (gtk3 would need libgtk-3-dev to build.)
 rfd = { workspace = true, features = ["xdg-portal"] }
+
+[dev-dependencies]
+# Only the tests use lopdf directly: they build small PDFs to merge.
+lopdf.workspace = true

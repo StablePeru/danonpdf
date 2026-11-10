@@ -1,0 +1,346 @@
+//! Tests for the merge window's state. None of them opens a window: that is
+//! the point of keeping the state apart from the drawing.
+
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use lopdf::{Document, Object, dictionary};
+
+use super::*;
+
+/// A path inside a folder called `docs`, built with `join` so the separator
+/// is right on every system.
+fn doc(name: &str) -> PathBuf {
+    Path::new("docs").join(name)
+}
+
+/// A list holding `names`, all inside `docs`.
+fn list_of(names: &[&str]) -> MergeList {
+    let mut list = MergeList::default();
+    list.add(names.iter().map(|name| doc(name)));
+    list
+}
+
+/// The file names in the list, in order, to compare against an array.
+fn names(list: &MergeList) -> Vec<String> {
+    list.files().iter().map(|path| display_name(path)).collect()
+}
+
+// Adding
+
+#[test]
+fn new_list_is_empty_and_idle() {
+    let list = MergeList::default();
+    assert!(list.files().is_empty());
+    assert_eq!(list.status(), &Status::Idle);
+}
+
+#[test]
+fn add_appends_pdfs_in_the_given_order() {
+    let list = list_of(&["b.pdf", "a.pdf", "c.PDF"]);
+    assert_eq!(names(&list), ["b.pdf", "a.pdf", "c.PDF"]);
+    assert_eq!(list.status(), &Status::Idle);
+}
+
+#[test]
+fn add_appends_after_the_files_already_there() {
+    let mut list = list_of(&["a.pdf"]);
+    list.add([doc("b.pdf")]);
+    assert_eq!(names(&list), ["a.pdf", "b.pdf"]);
+}
+
+#[test]
+fn add_leaves_out_files_that_are_not_pdf_and_says_how_many() {
+    let list = list_of(&["a.pdf", "photo.jpg", "notes.txt", "b.pdf"]);
+    assert_eq!(names(&list), ["a.pdf", "b.pdf"]);
+    assert_eq!(
+        list.status(),
+        &Status::Skipped {
+            not_pdf: 2,
+            duplicates: 0
+        }
+    );
+}
+
+#[test]
+fn add_leaves_out_files_already_in_the_list() {
+    let mut list = list_of(&["a.pdf", "b.pdf"]);
+    list.add([doc("b.pdf"), doc("c.pdf")]);
+    assert_eq!(names(&list), ["a.pdf", "b.pdf", "c.pdf"]);
+    assert_eq!(
+        list.status(),
+        &Status::Skipped {
+            not_pdf: 0,
+            duplicates: 1
+        }
+    );
+}
+
+#[test]
+fn add_leaves_out_repeats_within_the_same_batch() {
+    let list = list_of(&["a.pdf", "a.pdf"]);
+    assert_eq!(names(&list), ["a.pdf"]);
+    assert_eq!(
+        list.status(),
+        &Status::Skipped {
+            not_pdf: 0,
+            duplicates: 1
+        }
+    );
+}
+
+#[test]
+fn same_name_in_another_folder_is_not_a_duplicate() {
+    let mut list = list_of(&["a.pdf"]);
+    list.add([Path::new("other").join("a.pdf")]);
+    assert_eq!(list.files().len(), 2);
+}
+
+#[test]
+fn a_clean_add_clears_an_old_skipped_notice() {
+    let mut list = list_of(&["a.pdf", "photo.jpg"]);
+    list.add([doc("b.pdf")]);
+    assert_eq!(list.status(), &Status::Idle);
+}
+
+// Moving and removing
+
+#[test]
+fn move_up_swaps_with_the_file_above() {
+    let mut list = list_of(&["a.pdf", "b.pdf", "c.pdf"]);
+    list.move_up(2);
+    assert_eq!(names(&list), ["a.pdf", "c.pdf", "b.pdf"]);
+}
+
+#[test]
+fn move_up_on_the_first_file_does_nothing() {
+    let mut list = list_of(&["a.pdf", "b.pdf"]);
+    list.move_up(0);
+    assert_eq!(names(&list), ["a.pdf", "b.pdf"]);
+}
+
+#[test]
+fn move_up_past_the_end_does_nothing() {
+    let mut list = list_of(&["a.pdf", "b.pdf"]);
+    list.move_up(5);
+    assert_eq!(names(&list), ["a.pdf", "b.pdf"]);
+}
+
+#[test]
+fn move_down_swaps_with_the_file_below() {
+    let mut list = list_of(&["a.pdf", "b.pdf", "c.pdf"]);
+    list.move_down(0);
+    assert_eq!(names(&list), ["b.pdf", "a.pdf", "c.pdf"]);
+}
+
+#[test]
+fn move_down_on_the_last_file_does_nothing() {
+    let mut list = list_of(&["a.pdf", "b.pdf"]);
+    list.move_down(1);
+    assert_eq!(names(&list), ["a.pdf", "b.pdf"]);
+}
+
+#[test]
+fn move_down_past_the_end_does_nothing() {
+    let mut list = list_of(&["a.pdf", "b.pdf"]);
+    list.move_down(7);
+    assert_eq!(names(&list), ["a.pdf", "b.pdf"]);
+}
+
+#[test]
+fn moves_on_an_empty_list_do_nothing() {
+    let mut list = MergeList::default();
+    list.move_up(0);
+    list.move_down(0);
+    list.remove(0);
+    assert!(list.files().is_empty());
+}
+
+#[test]
+fn remove_takes_the_file_out_and_keeps_the_order() {
+    let mut list = list_of(&["a.pdf", "b.pdf", "c.pdf"]);
+    list.remove(1);
+    assert_eq!(names(&list), ["a.pdf", "c.pdf"]);
+}
+
+#[test]
+fn remove_past_the_end_does_nothing() {
+    let mut list = list_of(&["a.pdf"]);
+    list.remove(1);
+    assert_eq!(names(&list), ["a.pdf"]);
+}
+
+#[test]
+fn clear_empties_the_list_and_the_status() {
+    let mut list = list_of(&["a.pdf", "photo.jpg"]);
+    list.clear();
+    assert!(list.files().is_empty());
+    assert_eq!(list.status(), &Status::Idle);
+}
+
+#[test]
+fn changing_the_list_clears_an_old_merge_result() {
+    // A "merged 3 pages" line would describe a list that no longer exists.
+    let mut list = list_of(&["a.pdf", "b.pdf"]);
+    list.record_merge(doc("merged.pdf"), Ok(3));
+    list.move_down(0);
+    assert_eq!(list.status(), &Status::Idle);
+}
+
+#[test]
+fn apply_runs_each_row_action() {
+    let mut list = list_of(&["a.pdf", "b.pdf", "c.pdf"]);
+    list.apply(RowAction::MoveDown(0));
+    assert_eq!(names(&list), ["b.pdf", "a.pdf", "c.pdf"]);
+    list.apply(RowAction::MoveUp(2));
+    assert_eq!(names(&list), ["b.pdf", "c.pdf", "a.pdf"]);
+    list.apply(RowAction::Remove(0));
+    assert_eq!(names(&list), ["c.pdf", "a.pdf"]);
+}
+
+// Ready to merge, and where to
+
+#[test]
+fn can_merge_needs_at_least_two_files() {
+    assert!(!MergeList::default().can_merge());
+    assert!(!list_of(&["a.pdf"]).can_merge());
+    assert!(list_of(&["a.pdf", "b.pdf"]).can_merge());
+}
+
+#[test]
+fn empty_list_has_no_default_output() {
+    assert_eq!(MergeList::default().default_output_path(), None);
+}
+
+#[test]
+fn default_output_is_merged_pdf_next_to_the_first_file() {
+    let mut list = list_of(&["a.pdf"]);
+    list.add([Path::new("elsewhere").join("b.pdf")]);
+    assert_eq!(list.default_output_path(), Some(doc("merged.pdf")));
+}
+
+#[test]
+fn default_output_for_a_bare_file_name_is_a_bare_name() {
+    let mut list = MergeList::default();
+    list.add([PathBuf::from("a.pdf")]);
+    assert_eq!(
+        list.default_output_path(),
+        Some(PathBuf::from("merged.pdf"))
+    );
+}
+
+// Merge results
+
+#[test]
+fn successful_merge_is_recorded_with_pages_and_output() {
+    let mut list = list_of(&["a.pdf", "b.pdf"]);
+    list.record_merge(doc("out.pdf"), Ok(12));
+    assert_eq!(
+        list.status(),
+        &Status::Merged {
+            pages: 12,
+            output: doc("out.pdf")
+        }
+    );
+    // The list stays, so it can be changed and merged again.
+    assert_eq!(list.files().len(), 2);
+}
+
+#[test]
+fn failed_merge_is_recorded_with_its_whole_chain_of_causes() {
+    let mut list = list_of(&["a.pdf", "b.pdf"]);
+    let error = MergeError::Save {
+        path: PathBuf::from("out.pdf"),
+        source: io::Error::new(io::ErrorKind::PermissionDenied, "access denied"),
+    };
+    list.record_merge(PathBuf::from("out.pdf"), Err(error));
+    assert_eq!(
+        list.status(),
+        &Status::Failed {
+            message: "cannot save out.pdf: access denied".to_owned()
+        }
+    );
+}
+
+#[test]
+fn error_without_a_source_is_just_its_message() {
+    assert_eq!(
+        error_chain(&MergeError::NoInputs),
+        "there are no input files to merge"
+    );
+}
+
+#[test]
+fn merge_into_does_nothing_with_fewer_than_two_files() {
+    let mut list = list_of(&["a.pdf"]);
+    list.merge_into(doc("out.pdf"));
+    assert_eq!(list.status(), &Status::Idle);
+}
+
+#[test]
+fn merge_into_reports_a_file_that_cannot_be_read() {
+    let folder = std::env::temp_dir().join("danonpdf-desktop-missing-inputs");
+    let mut list = MergeList::default();
+    list.add([folder.join("a.pdf"), folder.join("b.pdf")]);
+    list.merge_into(folder.join("out.pdf"));
+
+    // `matches!` checks the shape of a value against a pattern, with an
+    // optional `if` condition, and returns a bool.
+    assert!(
+        matches!(list.status(), Status::Failed { message } if message.starts_with("cannot read")),
+        "unexpected status: {:?}",
+        list.status()
+    );
+}
+
+/// Saves a one-page PDF at `path`.
+fn save_one_page_pdf(path: &Path) {
+    let mut document = Document::with_version("1.5");
+    let pages_id = document.new_object_id();
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+    });
+    let pages = dictionary! { "Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1 };
+    document.objects.insert(pages_id, Object::Dictionary(pages));
+    let catalog_id = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    document.trailer.set("Root", catalog_id);
+    document.save(path).unwrap();
+}
+
+#[test]
+fn merge_into_writes_the_file_and_records_the_pages() {
+    let folder = std::env::temp_dir().join(format!("danonpdf-desktop-{}", std::process::id()));
+    fs::create_dir_all(&folder).unwrap();
+    let (first, second, output) = (
+        folder.join("a.pdf"),
+        folder.join("b.pdf"),
+        folder.join("out.pdf"),
+    );
+    save_one_page_pdf(&first);
+    save_one_page_pdf(&second);
+
+    let mut list = MergeList::default();
+    list.add([first, second]);
+    list.merge_into(output.clone());
+    let status = list.status().clone();
+    let written = output.exists();
+    fs::remove_dir_all(&folder).unwrap();
+
+    assert_eq!(status, Status::Merged { pages: 2, output });
+    assert!(written);
+}
+
+// Names
+
+#[test]
+fn display_name_is_the_file_name() {
+    assert_eq!(display_name(&doc("report.pdf")), "report.pdf");
+}
+
+#[test]
+fn display_name_without_a_file_name_is_the_whole_path() {
+    assert_eq!(display_name(Path::new("..")), "..");
+}
