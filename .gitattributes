@@ -1,0 +1,4 @@
+# Keep LF line endings in the repository and in every checkout. The build
+# runs inside a Linux container, and bash fails on CRLF scripts ($'\r'),
+# even when git on Windows is set to convert line endings.
+* text=auto eol=lf
