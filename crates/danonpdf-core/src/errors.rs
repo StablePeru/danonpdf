@@ -57,7 +57,10 @@ impl fmt::Display for PdfError {
         // `Path` is not always valid text, so it has no `Display` of its own:
         // `display()` borrows it as something printable.
         match self {
-            Self::NoInputs => write!(f, "there are no input files to merge"),
+            // No operation is named: every operation shares this enum, so
+            // "to merge" would be wrong the day another one takes a list
+            // of inputs. The caller knows what it asked for.
+            Self::NoInputs => write!(f, "there are no input files"),
             Self::Read { path, .. } => write!(f, "cannot read {} as a PDF", path.display()),
             Self::Encrypted { input } => {
                 write!(f, "input {input} is encrypted and needs a password")
@@ -176,9 +179,8 @@ mod tests {
 
     #[test]
     fn error_without_a_source_is_just_its_message() {
-        assert_eq!(
-            error_chain(&PdfError::NoInputs),
-            "there are no input files to merge"
-        );
+        // The wording names no operation: the enum is shared by all of
+        // them, and only the caller knows which one it asked for.
+        assert_eq!(error_chain(&PdfError::NoInputs), "there are no input files");
     }
 }

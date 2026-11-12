@@ -42,7 +42,7 @@ use lopdf::{Document, Object, ObjectId};
 use crate::document::{
     DetachedPages, InputProblem, detach_pages, install_page_tree, is_locked, load, set_parent,
 };
-use crate::save::save;
+use crate::save::{Durability, save};
 use crate::{PageSelection, PdfError};
 
 /// How many pages the PDF file `input` has.
@@ -68,7 +68,9 @@ pub fn page_count(input: &Path) -> Result<usize, PdfError> {
 pub fn extract_file(input: &Path, pages: &PageSelection, output: &Path) -> Result<usize, PdfError> {
     let mut extracted = Source::load(input)?.extract(pages)?;
     let page_count = extracted.page_iter().count();
-    save(&mut extracted, output)?;
+    // Synced, as in a merge: one file, which may replace an existing one
+    // (the input itself, even), so the short wait for the disk is worth it.
+    save(&mut extracted, output, Durability::Synced)?;
     Ok(page_count)
 }
 
@@ -313,17 +315,7 @@ pub fn split_output_paths(input: &Path, folder: &Path, parts: usize) -> Vec<Path
 /// 0 pages" means nothing, and with this type the mistake cannot even be
 /// passed in. With `every` at 1, each page gets its own file.
 pub fn plan_split(input: &Path, every: NonZeroUsize, folder: &Path) -> Result<SplitPlan, PdfError> {
-    let source = Source::load(input)?;
-    // `div_ceil` divides and rounds up: 5 pages in files of 2 make 3 files.
-    let parts = source.pages.len().div_ceil(every.get());
-    let outputs = split_output_paths(input, folder, parts);
-
-    Ok(SplitPlan {
-        source,
-        every,
-        folder: folder.to_path_buf(),
-        outputs,
-    })
+    Ok(SplitPlan::new(Source::load(input)?, input, every, folder))
 }
 
 /// A split that has been worked out and not yet written.
@@ -340,6 +332,26 @@ pub struct SplitPlan {
 }
 
 impl SplitPlan {
+    /// The plan for splitting `source`, which was read from `input`, into
+    /// files of `every` pages inside `folder`.
+    ///
+    /// Apart from [`plan_split`] so that a test can plan the split of a
+    /// document it built in memory, without a file to read it from. `input`
+    /// only lends its name to the files.
+    fn new(source: Source, input: &Path, every: NonZeroUsize, folder: &Path) -> Self {
+        // `div_ceil` divides and rounds up: 5 pages in files of 2 make 3
+        // files.
+        let parts = source.pages.len().div_ceil(every.get());
+        let outputs = split_output_paths(input, folder, parts);
+
+        Self {
+            source,
+            every,
+            folder: folder.to_path_buf(),
+            outputs,
+        }
+    }
+
     /// The files this split will write, in order. Their names follow
     /// [`split_output_paths`].
     pub fn outputs(&self) -> &[PathBuf] {
@@ -356,12 +368,28 @@ impl SplitPlan {
     /// their paths in order.
     ///
     /// Each file is written whole and then put in place in one step, so a
-    /// name never holds half a file. The files are written one after
+    /// split that fails, or a program that crashes, never leaves half a
+    /// file under one of the names. The files are written one after
     /// another; if one fails, the split stops there. The ones already
     /// written are complete and are kept, and the [`SplitError`] lists them.
     ///
     /// Takes `self` by value: a plan is carried out once, and the list of
     /// paths it held is handed back without being copied.
+    ///
+    /// # Not forced to the disk
+    ///
+    /// Unlike a merge or an extraction, a split does not wait for the disk
+    /// after each file ([`Durability::Unsynced`]). If the power goes while
+    /// it runs or in the moments after it, some of its files may be left
+    /// empty or incomplete. The input is never touched, so the way out is
+    /// to run the split again.
+    ///
+    /// That wait was measured at over 99% of the time of a split into many
+    /// small files: with it, 300 one-page files took 2.9 s on Windows and
+    /// about 5 s in the build container; without it, about 20 ms in that
+    /// same container (the timing test at the end of `split/tests.rs`).
+    /// The price is a split to run again after a power cut, from an input
+    /// that is still whole.
     ///
     /// # Cost
     ///
@@ -373,10 +401,6 @@ impl SplitPlan {
     /// costs about as much as copying it once, however many files that
     /// makes; one whose every page points at the same large resources costs
     /// that much per file.
-    ///
-    /// Each file is also made safe on the disk before the next one starts,
-    /// which takes a moment per file whatever its size. With hundreds of
-    /// small files, that wait is most of the time.
     ///
     /// Memory holds the input and one file's worth of copies at a time.
     pub fn write(self) -> Result<Vec<PathBuf>, SplitError> {
@@ -412,9 +436,14 @@ impl SplitPlan {
         for (pages, path) in source.pages.chunks(every.get()).zip(&outputs) {
             // `and_then` runs the save only if the part could be built, and
             // gives the first error of the two otherwise.
+            //
+            // Unsynced: this is the one place in the core that does not
+            // wait for the disk, and "Not forced to the disk" above says
+            // why. A part can always be made again from the input, which
+            // no split ever writes to.
             let saved = source
                 .part(pages)
-                .and_then(|mut part| save(&mut part, path));
+                .and_then(|mut part| save(&mut part, path, Durability::Unsynced));
             if let Err(error) = saved {
                 failure = Some(error);
                 break;

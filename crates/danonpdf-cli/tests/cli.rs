@@ -762,9 +762,13 @@ fn a_page_past_the_end_is_page_out_of_range_and_writes_nothing() {
     let error = failure_of(&result, "extract", "page_out_of_range");
     // The failure is about the pages asked for, not about a file.
     assert_eq!(error.get("path"), None);
-    assert_eq!(
-        error["message"],
-        "page 9 is past the end of the document, which has 5 pages"
+    // The wording belongs to the core and may change, so only what a
+    // reader needs from it is pinned: the page that was asked for and how
+    // many pages the document has.
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.contains("page 9") && message.contains("5 pages"),
+        "unexpected message: {message}"
     );
     assert_eq!(scratch.entries(), ["in.pdf"]);
 }
@@ -869,6 +873,35 @@ fn split_every_n_pages_leaves_a_shorter_last_file() {
     assert_eq!(page_widths(&folder.join("doc-001.pdf")), [501, 502]);
     assert_eq!(page_widths(&folder.join("doc-002.pdf")), [503, 504]);
     assert_eq!(page_widths(&folder.join("doc-003.pdf")), [505]);
+}
+
+#[test]
+fn split_every_as_many_pages_as_there_are_or_more_writes_one_file() {
+    // "5" is exactly the page count and "8" is past it: both mean one file
+    // with every page, not an error and not an empty second file.
+    for every in ["5", "8"] {
+        let scratch = ScratchDir::new(&format!("split-every-{every}-of-5"));
+        let input = scratch.pdf("doc.pdf", 5);
+        let folder = scratch.file("parts");
+        let only = folder.join("doc-001.pdf");
+
+        let result = split(&["--json", "--every", every], &folder, &input);
+
+        assert_eq!(result.status.code(), Some(0), "--every {every}");
+        assert_eq!(
+            json_report(&result),
+            json!({
+                "ok": true,
+                "operation": "split",
+                "outputs": [text(&only)],
+                "files": 1,
+                "pages": 5,
+            }),
+            "--every {every}"
+        );
+        assert_eq!(entries_of(&folder), ["doc-001.pdf"], "--every {every}");
+        assert_eq!(page_widths(&only), [501, 502, 503, 504, 505]);
+    }
 }
 
 #[test]

@@ -24,7 +24,7 @@ use lopdf::{Document, ObjectId};
 
 use crate::PdfError;
 use crate::document::{InputProblem, detach_pages, install_page_tree, is_locked, load, set_parent};
-use crate::save::save;
+use crate::save::{Durability, save};
 
 /// Merges `documents` into a new document: all the pages of the first one,
 /// then all the pages of the second one, and so on.
@@ -144,7 +144,10 @@ pub fn merge_files<P: AsRef<Path>>(inputs: &[P], output: &Path) -> Result<usize,
     merged.prune_objects();
     let page_count = merged.page_iter().count();
 
-    save(&mut merged, output)?;
+    // Synced: `output` may be a file that is being replaced (even one of
+    // the inputs), and it is one file, so waiting for the disk costs one
+    // short wait and protects something that may not exist anywhere else.
+    save(&mut merged, output, Durability::Synced)?;
     Ok(page_count)
 }
 

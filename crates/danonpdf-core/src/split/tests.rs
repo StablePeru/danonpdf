@@ -61,6 +61,29 @@ fn link_target(document: &Document) -> ObjectId {
         .unwrap()
 }
 
+/// A three-page document ("A1", "A2", "A3") whose second page points at an
+/// object numbered `number`. Its other pages do not use that object.
+///
+/// With `number` at the highest object number there is, or just below it,
+/// a new document that takes page 2 has no two free numbers above its own
+/// objects for a page tree and a catalog.
+fn with_page_2_using_object_number(number: u32) -> Document {
+    let mut document = with_pages("A", 3);
+    let second = document.page_iter().nth(1).unwrap();
+    // Straight into the map, under the number the test wants. `add_object`
+    // would pick the next free number itself.
+    let note_id = (number, 0);
+    document.objects.insert(
+        note_id,
+        Object::Dictionary(dictionary! { "Type" => "Annot", "Subtype" => "Text", "Rect" => a4() }),
+    );
+    document
+        .get_dictionary_mut(second)
+        .unwrap()
+        .set("Annots", vec![Object::Reference(note_id)]);
+    document
+}
+
 // Counting pages
 
 #[test]
@@ -312,6 +335,37 @@ fn a_page_tree_that_names_a_missing_page_is_broken() {
         ),
         "got {result:?}"
     );
+}
+
+#[test]
+fn pages_whose_objects_leave_no_number_free_are_refused() {
+    // The new page tree and catalog take the two numbers after the highest
+    // one among the objects that travel. At the very top there is no such
+    // number, and one below it there is room for the page tree only.
+    for number in [u32::MAX, u32::MAX - 1] {
+        let result = extract_document(with_page_2_using_object_number(number), &selection("2"));
+
+        assert!(
+            matches!(
+                result,
+                Err(PdfError::Broken {
+                    input: 1,
+                    reason: "its object numbers leave no room for a new page tree"
+                })
+            ),
+            "object number {number} gave {result:?}"
+        );
+    }
+}
+
+#[test]
+fn an_object_number_at_the_top_only_matters_to_the_pages_that_use_it() {
+    // Page 1 does not use the object, so the object stays behind and the
+    // numbers above what page 1 does use are free.
+    let extracted =
+        extract_document(with_page_2_using_object_number(u32::MAX), &selection("1")).unwrap();
+
+    assert_eq!(markers(&extracted), ["A1"]);
 }
 
 #[test]
@@ -625,6 +679,47 @@ fn a_split_that_stops_midway_says_where_and_keeps_what_it_wrote() {
 }
 
 #[test]
+fn a_split_stops_at_a_part_that_cannot_be_built_and_keeps_the_ones_before() {
+    // The other way for a split to stop midway: the second part cannot even
+    // be put together, so there is nothing to save. Such a document cannot
+    // be written to a file cheaply (lopdf would list every object number up
+    // to the highest one), so the plan is made from the document in memory.
+    let scratch = ScratchDir::new("split-part-not-built");
+    let folder = scratch.file("parts");
+    let source = Source::new(with_page_2_using_object_number(u32::MAX)).unwrap();
+    let plan = SplitPlan::new(source, Path::new("a.pdf"), every(1), &folder);
+
+    let error = plan.write().unwrap_err();
+
+    assert!(
+        matches!(
+            error.error,
+            PdfError::Broken {
+                input: 1,
+                reason: "its object numbers leave no room for a new page tree"
+            }
+        ),
+        "got {:?}",
+        error.error
+    );
+    assert_eq!(error.written, [folder.join("a-001.pdf")]);
+    assert_eq!(error.parts, 3);
+    // The first part is complete; the second was never started on disk (no
+    // file, no temporary file), and the third was not tried.
+    assert_eq!(markers_in(&folder.join("a-001.pdf")), ["A1"]);
+    let names: Vec<String> = fs::read_dir(&folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names, ["a-001.pdf"]);
+    assert_eq!(
+        error_chain(&error),
+        "the split stopped after 1 of 3 files: input 1 is damaged: \
+         its object numbers leave no room for a new page tree"
+    );
+}
+
+#[test]
 fn a_folder_that_cannot_be_created_stops_the_split_before_any_file() {
     let scratch = ScratchDir::new("split-folder-is-file");
     let input = scratch.save("a.pdf", with_pages("A", 2));
@@ -652,9 +747,9 @@ fn a_folder_that_cannot_be_created_stops_the_split_before_any_file() {
 /// ```
 ///
 /// The pages are tiny, so this times the work per file (find what the page
-/// uses, copy it, write it, wait for the disk, rename) and not the copying
-/// of big images. Nearly all of that time is the wait for the disk: see
-/// "Cost" on `SplitPlan::write`.
+/// uses, copy it, write it, rename) and not the copying of big images. It
+/// is the measurement behind the choice not to wait for the disk after
+/// each part: see "Cost" on `SplitPlan::write`.
 #[test]
 #[ignore = "a timing, not a check: run it by name, in release mode"]
 fn splitting_300_pages_into_300_files_is_timed() {
