@@ -16,7 +16,8 @@ use std::path::PathBuf;
 
 use eframe::egui;
 
-use crate::merge_list::{MergeList, RowAction, SaveSuggestion, Status, display_name};
+use crate::merge_list::{MergeList, RowAction, Status};
+use crate::paths::{SaveSuggestion, display_name};
 use crate::texts;
 
 /// The whole app state. `Default` gives an empty list.

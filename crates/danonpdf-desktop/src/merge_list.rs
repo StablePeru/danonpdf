@@ -8,8 +8,9 @@
 
 use std::path::{Path, PathBuf};
 
-use danonpdf_core::{PdfError, error_chain, is_pdf_path, merge_files, name_is_taken, same_file};
+use danonpdf_core::{PdfError, error_chain, is_pdf_path, merge_files, same_file};
 
+use crate::paths::{OutputRefusal, SaveSuggestion, first_free_path, output_from_dialog};
 use crate::texts;
 
 /// The files to merge, in merge order, and the outcome of the last action.
@@ -46,11 +47,8 @@ pub enum Status {
     /// list: writing there would replace a file before it is read.
     OutputIsInput { output: PathBuf },
     /// The merge was refused because ".pdf" had to be added to the name the
-    /// user typed, and `output` (the name with ".pdf") already exists.
-    ///
-    /// The save dialog only asks "replace?" for the name it returns. On Linux
-    /// that is the name as typed ("report"), so nobody confirmed replacing
-    /// "report.pdf"; writing there would destroy an unrelated file silently.
+    /// user typed, and `output` (the name with ".pdf") already exists. Why
+    /// that is refused is told on `OutputRefusal`, in `paths.rs`.
     ExistsAfterAddingExtension { output: PathBuf },
     /// The last merge failed. The message already holds the whole chain of
     /// causes, because `PdfError` cannot be cloned or kept around cheaply.
@@ -180,13 +178,15 @@ impl MergeList {
         // `?` on an `Option` returns `None` from the whole function when the
         // list is empty, so the rest only runs when there is a first file.
         let first = self.files.first()?;
-        // `1..` counts up without end, and `find` stops at the first number
-        // whose path is free. It always stops: the list is finite, so it
-        // cannot hold every name. `with_file_name` keeps the folder and
-        // swaps the name.
-        (1..)
-            .map(|attempt| first.with_file_name(texts::output_name(attempt)))
-            .find(|candidate| !self.is_input(candidate))
+        // `with_file_name` keeps the folder and swaps the name. The search
+        // through the numbered names is shared with the other views; what
+        // is particular to a merge is the test: free means "not one of the
+        // files in the list". Whether the name exists on disk is left to
+        // the save dialog, which asks before replacing.
+        first_free_path(
+            &first.with_file_name(texts::DEFAULT_OUTPUT_NAME),
+            |candidate| !self.is_input(candidate),
+        )
     }
 
     /// What the save dialog starts with: the folder and file name of
@@ -200,10 +200,11 @@ impl MergeList {
     /// Merges the files into `output` and records the outcome in the status.
     /// Does nothing unless [`Self::can_merge`].
     ///
-    /// `output` gets ".pdf" added when it has no extension at all (see
-    /// [`with_pdf_extension`]). The merge is refused, and the core is never
-    /// called, when `output` is one of the files in the list, or when ".pdf"
-    /// was added and a file with the new name already exists.
+    /// `output` gets ".pdf" added when it has no extension at all. The merge
+    /// is refused, and the core is never called, when `output` is one of the
+    /// files in the list, or when ".pdf" was added and a file with the new
+    /// name already exists: see [`output_from_dialog`], which holds both
+    /// rules for every view.
     ///
     /// This runs on the thread that draws the window, so the window does not
     /// answer until the merge ends: a moment for everyday files, but several
@@ -213,29 +214,20 @@ impl MergeList {
         if !self.can_merge() {
             return;
         }
-        // The extension first, so that typing "a" when "a.pdf" is in the
-        // list is caught by the checks below. The typed name is kept (a
-        // `clone` of a short path costs next to nothing) to tell whether
-        // `with_pdf_extension` changed it, without repeating its rule here.
-        let typed = output.clone();
-        let output = with_pdf_extension(output);
-        if self.is_input(&output) {
-            self.status = Status::OutputIsInput { output };
-            return;
-        }
-        // The dialog asked "replace?" only for the name it returned. When
-        // that name was changed, an existing file under the new name was
-        // never confirmed, so refuse instead of replacing it silently. On
-        // Windows the dialog adds ".pdf" itself, so this only fires on
-        // systems whose dialog returns the name as typed, such as Linux.
-        //
-        // `name_is_taken` is the core's rule, the one the command-line tool
-        // uses for `--force`. Unlike `Path::exists` it also says yes for a
-        // link whose target is gone: saving would replace that link too.
-        if output != typed && name_is_taken(&output) {
-            self.status = Status::ExistsAfterAddingExtension { output };
-            return;
-        }
+        // The closure tells the shared rule what an input is here: any
+        // file of the list. `match` then takes the two outcomes apart: a
+        // path to write to, or the reason not to, which becomes the status.
+        let output = match output_from_dialog(output, |path| self.is_input(path)) {
+            Ok(output) => output,
+            Err(OutputRefusal::IsInput { output }) => {
+                self.status = Status::OutputIsInput { output };
+                return;
+            }
+            Err(OutputRefusal::ExistsAfterAddingExtension { output }) => {
+                self.status = Status::ExistsAfterAddingExtension { output };
+                return;
+            }
+        };
         // `&self.files` lends the list to the core, which only reads it.
         let result = merge_files(&self.files, &output);
         self.record_merge(output, result);
@@ -267,74 +259,6 @@ impl MergeList {
     /// or "skipped 1 file" line would describe a list that no longer exists.
     fn list_changed(&mut self) {
         self.status = Status::Idle;
-    }
-}
-
-/// Where the save dialog opens and the name it proposes.
-///
-/// rfd takes the folder and the file name separately. Splitting the path
-/// here, and not in the drawing code, keeps the rules about empty folders
-/// and odd names where they can be tested.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct SaveSuggestion {
-    /// The folder to open the dialog in. `None` lets the system choose.
-    pub folder: Option<PathBuf>,
-    /// The name already typed in the dialog. `None` leaves it empty.
-    pub file_name: Option<String>,
-}
-
-impl SaveSuggestion {
-    /// Splits `path` into the folder to open and the name to propose.
-    pub fn for_path(path: &Path) -> Self {
-        // A bare file name such as "merged.pdf" has an empty folder (""),
-        // which is not a place to open the dialog in; `filter` turns it
-        // into `None`. `to_path_buf` copies the borrowed folder out.
-        let folder = path
-            .parent()
-            .filter(|folder| !folder.as_os_str().is_empty())
-            .map(Path::to_path_buf);
-        // rfd wants the name as text. `to_string_lossy` replaces bytes that
-        // are not valid UTF-8 with "�": good enough for a proposal the
-        // user can still edit.
-        let file_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned());
-        Self { folder, file_name }
-    }
-}
-
-/// `path` with ".pdf" added when its file name has no extension at all.
-///
-/// The Windows save dialog adds ".pdf" itself, but the Linux file chooser
-/// returns the name exactly as typed, and a merged PDF called "report" is
-/// hard to open with a double click. A name with another extension
-/// ("report.txt") is left as the user typed it: that looks deliberate.
-///
-/// "Has an extension" follows std's [`Path::extension`], which can surprise:
-///
-/// - "v1.2 notes" has one ("2 notes", everything after the last dot), so it
-///   stays as typed.
-/// - ".report" has none (a leading dot starts a hidden name), so it becomes
-///   ".report.pdf".
-/// - "report." has an empty one, which still counts, so it stays as typed.
-pub fn with_pdf_extension(path: PathBuf) -> PathBuf {
-    if path.extension().is_none() {
-        // `with_extension` builds a new path; the old one is dropped.
-        path.with_extension("pdf")
-    } else {
-        path
-    }
-}
-
-/// The text shown for `path` in the list: its file name, or the whole path
-/// if it has no file name (a path such as `/` or `..`).
-pub fn display_name(path: &Path) -> String {
-    // `to_string_lossy` turns a name that is not valid UTF-8 into text by
-    // replacing the bad bytes with "�", which is fine for showing it. The
-    // path itself, used to open the file, stays untouched.
-    match path.file_name() {
-        Some(name) => name.to_string_lossy().into_owned(),
-        None => path.display().to_string(),
     }
 }
 

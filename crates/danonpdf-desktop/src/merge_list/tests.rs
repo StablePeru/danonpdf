@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use lopdf::{Document, Object, dictionary};
 
 use super::*;
+use crate::paths::display_name;
 
 /// A path inside a folder called `docs`, built with `join` so the separator
 /// is right on every system.
@@ -268,29 +269,6 @@ fn save_suggestion_for_an_empty_list_is_empty() {
     );
 }
 
-#[test]
-fn save_suggestion_for_a_bare_name_has_no_folder() {
-    // An empty folder ("") is not a place to open a dialog in.
-    assert_eq!(
-        SaveSuggestion::for_path(Path::new("merged.pdf")),
-        SaveSuggestion {
-            folder: None,
-            file_name: Some("merged.pdf".to_owned()),
-        }
-    );
-}
-
-#[test]
-fn save_suggestion_for_a_path_without_a_name_has_no_name() {
-    assert_eq!(
-        SaveSuggestion::for_path(Path::new("..")),
-        SaveSuggestion {
-            folder: None,
-            file_name: None,
-        }
-    );
-}
-
 // Merge results
 
 #[test]
@@ -426,26 +404,6 @@ fn merge_into_refuses_a_name_that_becomes_an_input_once_pdf_is_added() {
 }
 
 #[test]
-fn with_pdf_extension_adds_pdf_only_when_there_is_no_extension() {
-    assert_eq!(with_pdf_extension(doc("report")), doc("report.pdf"));
-    assert_eq!(with_pdf_extension(doc("report.pdf")), doc("report.pdf"));
-    assert_eq!(with_pdf_extension(doc("report.PDF")), doc("report.PDF"));
-    // Another extension looks deliberate, so it stays as typed.
-    assert_eq!(with_pdf_extension(doc("report.txt")), doc("report.txt"));
-}
-
-#[test]
-fn with_pdf_extension_follows_the_std_rule_for_odd_names() {
-    // For std, everything after the last dot is the extension: "2 notes"
-    // here. So this name counts as having one and stays as typed.
-    assert_eq!(with_pdf_extension(doc("v1.2 notes")), doc("v1.2 notes"));
-    // A leading dot starts a hidden name, not an extension.
-    assert_eq!(with_pdf_extension(doc(".report")), doc(".report.pdf"));
-    // A trailing dot gives an empty extension, which is still "some".
-    assert_eq!(with_pdf_extension(doc("report.")), doc("report."));
-}
-
-#[test]
 fn merge_into_does_not_replace_a_file_named_only_by_the_added_extension() {
     // On Linux the dialog asked about "report", which did not exist, so
     // nobody agreed to replace the unrelated "report.pdf".
@@ -550,16 +508,4 @@ fn merge_into_writes_the_file_and_records_the_pages() {
 
     assert_eq!(status, Status::Merged { pages: 2, output });
     assert!(written);
-}
-
-// Names
-
-#[test]
-fn display_name_is_the_file_name() {
-    assert_eq!(display_name(&doc("report.pdf")), "report.pdf");
-}
-
-#[test]
-fn display_name_without_a_file_name_is_the_whole_path() {
-    assert_eq!(display_name(Path::new("..")), "..");
 }

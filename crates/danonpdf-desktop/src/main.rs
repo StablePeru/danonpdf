@@ -6,6 +6,7 @@
 
 mod app;
 mod merge_list;
+mod paths;
 mod texts;
 
 use eframe::egui;

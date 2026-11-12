@@ -23,27 +23,29 @@ pub fn startup_error(error: &dyn Display) -> String {
 }
 
 /// The file name the save dialog proposes for a merge, and the base of the
-/// numbered names that follow it.
+/// numbered names that follow it (see [`numbered_name`]).
 pub const DEFAULT_OUTPUT_NAME: &str = "merged.pdf";
 
-/// The `attempt`-th name to propose for a merge: "merged.pdf" first, then
-/// "merged (2).pdf", "merged (3).pdf"… The numbering copies what file
-/// managers do with copies, so it looks familiar.
+/// The `attempt`-th name to propose when `name` is the first choice:
+/// `name` itself first, then "merged (2).pdf", "merged (3).pdf"… for
+/// "merged.pdf". The numbering copies what file managers do with copies,
+/// so it looks familiar.
 ///
-/// The numbered names are built from [`DEFAULT_OUTPUT_NAME`], so renaming
-/// that one constant (in a translation, say) renames them all.
-pub fn output_name(attempt: usize) -> String {
+/// Every proposal of the window goes through here, so the numbering looks
+/// the same whatever is being saved, and a translation that numbers
+/// differently changes one function.
+pub fn numbered_name(name: &str, attempt: usize) -> String {
     match attempt {
         // 0 is not a real attempt; treat it as the first one rather than
         // proposing a strange "merged (0).pdf".
-        0 | 1 => DEFAULT_OUTPUT_NAME.to_owned(),
+        0 | 1 => name.to_owned(),
         // `rsplit_once` cuts at the last dot: ("merged", "pdf"). The number
         // goes between the two parts, before the extension, so the file
         // still opens as a PDF.
-        _ => match DEFAULT_OUTPUT_NAME.rsplit_once('.') {
+        _ => match name.rsplit_once('.') {
             Some((stem, extension)) => format!("{stem} ({attempt}).{extension}"),
             // A name without a dot has nothing to keep at the end.
-            None => format!("{DEFAULT_OUTPUT_NAME} ({attempt})"),
+            None => format!("{name} ({attempt})"),
         },
     }
 }
@@ -166,20 +168,30 @@ mod tests {
     }
 
     #[test]
-    fn output_names_are_numbered_after_the_first() {
-        assert_eq!(output_name(1), "merged.pdf");
-        assert_eq!(output_name(2), "merged (2).pdf");
-        assert_eq!(output_name(10), "merged (10).pdf");
-        assert_eq!(output_name(0), "merged.pdf");
+    fn names_are_numbered_after_the_first() {
+        assert_eq!(numbered_name("merged.pdf", 1), "merged.pdf");
+        assert_eq!(numbered_name("merged.pdf", 2), "merged (2).pdf");
+        assert_eq!(numbered_name("merged.pdf", 10), "merged (10).pdf");
+        assert_eq!(numbered_name("merged.pdf", 0), "merged.pdf");
     }
 
     #[test]
-    fn numbered_output_names_come_from_the_default_name() {
+    fn the_number_goes_before_the_last_extension_only() {
+        assert_eq!(numbered_name("report.final.pdf", 2), "report.final (2).pdf");
+        // Nothing to keep at the end of a name without a dot.
+        assert_eq!(numbered_name("notes", 3), "notes (3)");
+    }
+
+    #[test]
+    fn the_default_merge_name_is_numbered_like_any_other() {
         // Whatever the default name is, the numbered ones share its start and
         // its extension, so changing the constant changes every proposal.
         let (stem, extension) = DEFAULT_OUTPUT_NAME.rsplit_once('.').unwrap();
-        assert_eq!(output_name(1), DEFAULT_OUTPUT_NAME);
-        assert_eq!(output_name(2), format!("{stem} (2).{extension}"));
+        assert_eq!(numbered_name(DEFAULT_OUTPUT_NAME, 1), DEFAULT_OUTPUT_NAME);
+        assert_eq!(
+            numbered_name(DEFAULT_OUTPUT_NAME, 2),
+            format!("{stem} (2).{extension}")
+        );
     }
 
     #[test]
