@@ -49,8 +49,12 @@ pub fn first_free_path(first_choice: &Path, is_free: impl Fn(&Path) -> bool) -> 
     // that was not valid text.
     let name = first_choice.file_name()?.to_string_lossy();
     // `1..` counts up without end, and `find` stops at the first number
-    // whose path is free. It always stops for the two callers: a list of
-    // files and a folder are both finite, so neither can hold every name.
+    // whose path is free. It always stops for the two callers there are:
+    // `MergeList::default_output_path` asks for a name that is not in its
+    // list of files, and `SplitForm::default_extract_path` for one that
+    // does not exist in a folder. A list and a folder are both finite, so
+    // neither can hold every numbered name. A new caller has to make sure
+    // of the same, or this loop never ends.
     // `with_file_name` keeps the folder and swaps the name.
     (1..)
         .map(|attempt| first_choice.with_file_name(texts::numbered_name(&name, attempt)))

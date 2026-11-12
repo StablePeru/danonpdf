@@ -11,6 +11,7 @@
 //! there is a second language.
 
 use std::fmt::Display;
+use std::path::Path;
 
 /// The name in the title bar and in dialogs. A brand, so never translated.
 pub const APP_NAME: &str = "DanonPDF";
@@ -40,15 +41,34 @@ pub fn numbered_name(name: &str, attempt: usize) -> String {
         // 0 is not a real attempt; treat it as the first one rather than
         // proposing a strange "merged (0).pdf".
         0 | 1 => name.to_owned(),
-        // `rsplit_once` cuts at the last dot: ("merged", "pdf"). The number
-        // goes between the two parts, before the extension, so the file
-        // still opens as a PDF.
-        _ => match name.rsplit_once('.') {
+        // The number goes before the extension, so the file still opens as
+        // a PDF: ("merged", "pdf") becomes "merged (2).pdf".
+        //
+        // Where the extension starts is asked of the standard library and
+        // not found by cutting at the last dot, because the two disagree on
+        // names that do happen: in ".report" the dot is part of the name (a
+        // hidden file on Linux), and cutting there would propose
+        // " (2).report". With `Path` the rule is also the one the rest of
+        // the app uses when it reads a stem or an extension.
+        _ => match name_parts(name) {
             Some((stem, extension)) => format!("{stem} ({attempt}).{extension}"),
-            // A name without a dot has nothing to keep at the end.
+            // A name without an extension has nothing to keep at the end.
             None => format!("{name} ({attempt})"),
         },
     }
+}
+
+/// `name` cut where its extension starts: ("merged", "pdf") for
+/// "merged.pdf". `None` when the name has no extension.
+fn name_parts(name: &str) -> Option<(&str, &str)> {
+    let name = Path::new(name);
+    // `file_stem` and `extension` answer in `OsStr`, the system's own kind
+    // of text, because a path need not be valid UTF-8. This one was made
+    // from a `&str`, so `to_str` always succeeds; `?` is there because the
+    // types cannot know that.
+    let stem = name.file_stem()?.to_str()?;
+    let extension = name.extension()?.to_str()?;
+    Some((stem, extension))
 }
 
 // The view switch
@@ -346,13 +366,24 @@ pub fn split_name_taken(output_name: &str) -> String {
 
 /// A split stopped after some of its files. `reason` is the error and its
 /// causes; `folder` is where the finished files are.
+///
+/// When files were kept, the line also says how to try again. Splitting
+/// into the same folder a second time would be refused (see
+/// [`split_name_taken`]): the files that were kept have the very names the
+/// new split would use, and the window never replaces them. Saying so here
+/// saves the user from finding it out with a second failure.
 pub fn split_stopped(written: usize, parts: usize, folder: &str, reason: &str) -> String {
+    let stopped = format!("The split stopped after {written} of {parts} files: {reason}.");
     let kept = match written {
-        0 => "No file was written.".to_owned(),
+        // Nothing is in the way of a retry, so there is no advice to give.
+        0 => return format!("{stopped} No file was written."),
         1 => format!("The 1 file already in {folder} is complete and was kept."),
         _ => format!("The {written} files already in {folder} are complete and were kept."),
     };
-    format!("The split stopped after {written} of {parts} files: {reason}. {kept}")
+    format!(
+        "{stopped} {kept} To try again, choose another folder or empty that one first: \
+         files that are already there are never replaced."
+    )
 }
 
 #[cfg(test)]
@@ -387,6 +418,25 @@ mod tests {
         assert_eq!(numbered_name("report.final.pdf", 2), "report.final (2).pdf");
         // Nothing to keep at the end of a name without a dot.
         assert_eq!(numbered_name("notes", 3), "notes (3)");
+    }
+
+    #[test]
+    fn a_leading_dot_is_part_of_the_name_and_not_an_extension() {
+        // ".report" is a hidden file called ".report", with no extension.
+        // Cutting at its only dot would give " (2).report": a name that
+        // starts with a space and is no longer hidden.
+        assert_eq!(numbered_name(".report", 2), ".report (2)");
+        // With a real extension after it, only that one is kept at the end.
+        assert_eq!(numbered_name(".report.pdf", 2), ".report (2).pdf");
+    }
+
+    #[test]
+    fn a_dot_that_ends_the_name_keeps_its_place() {
+        // For std, "report." has an empty extension: the number goes before
+        // the dot, as it does before any other extension.
+        assert_eq!(numbered_name("report.", 2), "report (2).");
+        // ".." has no stem and no extension at all: nothing is cut.
+        assert_eq!(numbered_name("..", 2), ".. (2)");
     }
 
     #[test]
@@ -494,21 +544,59 @@ mod tests {
     }
 
     #[test]
-    fn split_stopped_says_how_far_it_got_and_what_was_kept() {
+    fn split_stopped_says_how_far_it_got_what_was_kept_and_how_to_retry() {
         assert_eq!(
             split_stopped(2, 5, "parts", "cannot save x.pdf: disk full"),
             "The split stopped after 2 of 5 files: cannot save x.pdf: disk full. \
-             The 2 files already in parts are complete and were kept."
+             The 2 files already in parts are complete and were kept. \
+             To try again, choose another folder or empty that one first: \
+             files that are already there are never replaced."
         );
         assert_eq!(
             split_stopped(1, 5, "parts", "boom"),
             "The split stopped after 1 of 5 files: boom. \
-             The 1 file already in parts is complete and was kept."
+             The 1 file already in parts is complete and was kept. \
+             To try again, choose another folder or empty that one first: \
+             files that are already there are never replaced."
         );
+    }
+
+    #[test]
+    fn split_stopped_before_any_file_has_nothing_in_the_way_of_a_retry() {
+        // No file was left behind, so the same folder can be chosen again
+        // and the advice about another folder would only mislead.
         assert_eq!(
             split_stopped(0, 5, "parts", "cannot create the folder parts: denied"),
             "The split stopped after 0 of 5 files: cannot create the folder parts: denied. \
              No file was written."
+        );
+    }
+
+    #[test]
+    fn failures_and_refused_files_carry_the_reason_they_were_given() {
+        assert_eq!(
+            extract_failed("cannot save out.pdf: access denied"),
+            "Could not extract: cannot save out.pdf: access denied"
+        );
+        assert_eq!(
+            split_failed("cannot read a.pdf as a PDF: no such file"),
+            "Could not split: cannot read a.pdf as a PDF: no such file"
+        );
+        assert_eq!(
+            not_accepted("locked.pdf", "input 1 is encrypted and needs a password"),
+            "Cannot use locked.pdf: input 1 is encrypted and needs a password"
+        );
+        assert_eq!(
+            pages_invalid("page 9 is past the end of the document, which has 5 pages"),
+            "Cannot use these pages: page 9 is past the end of the document, which has 5 pages"
+        );
+    }
+
+    #[test]
+    fn the_idle_line_names_the_chosen_file() {
+        assert_eq!(
+            file_chosen("report.pdf"),
+            "report.pdf is only read: its pages go to new files."
         );
     }
 

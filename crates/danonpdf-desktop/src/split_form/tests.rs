@@ -161,7 +161,9 @@ fn a_file_that_needs_a_password_or_is_missing_is_not_accepted() {
         form.status(),
         &Status::NotAccepted {
             file: locked,
-            message: "input 1 is encrypted and needs a password".to_owned()
+            // The wording is the core's, so it is asked for and not copied:
+            // a change of words there must not fail a test here.
+            message: PdfError::Encrypted { input: 1 }.to_string()
         }
     );
 
@@ -311,7 +313,60 @@ fn choosing_another_file_checks_the_text_against_its_pages() {
     );
 }
 
+#[test]
+fn the_extract_button_knows_what_it_is_still_waiting_for() {
+    let scratch = ScratchDir::new("extract-needs");
+    let mut form = SplitForm::default();
+
+    // Without a file, that is what is missing, whatever has been typed.
+    assert_eq!(form.extract_needs(), Some(ExtractNeeds::File));
+    form.set_pages_text("1".to_owned());
+    assert_eq!(form.extract_needs(), Some(ExtractNeeds::File));
+    assert!(!form.can_extract());
+
+    form.choose([scratch.pdf("report.pdf", 5)]);
+    assert_eq!(form.extract_needs(), None);
+    assert!(form.can_extract());
+
+    // With a file, the pages are what is missing: wrong ones, or none.
+    for text in ["9", ""] {
+        form.set_pages_text(text.to_owned());
+        assert_eq!(form.extract_needs(), Some(ExtractNeeds::Pages), "{text:?}");
+        assert!(!form.can_extract(), "{text:?}");
+    }
+}
+
 // Mode, and what makes an old status stale
+
+#[test]
+fn choosing_a_file_replaces_the_result_of_an_earlier_operation() {
+    // A line about pages extracted from the old file, or about a failure
+    // with it, says nothing true about the file that is chosen now.
+    let scratch = ScratchDir::new("choose-clears-status");
+    let next = scratch.pdf("next.pdf", 2);
+    // Three ways to leave a result behind. A closure that uses nothing
+    // around it can stand in for a plain function, which is what lets the
+    // three share one type (`fn(&mut SplitForm)`) and sit in one array.
+    let results: [fn(&mut SplitForm); 3] = [
+        |form| form.record_extract(PathBuf::from("out.pdf"), Ok(2)),
+        |form| {
+            let written = vec![Path::new("parts").join("report-001.pdf")];
+            form.record_split(PathBuf::from("parts"), 5, Ok(written));
+        },
+        |form| form.record_extract(PathBuf::from("out.pdf"), Err(PdfError::NoInputs)),
+    ];
+
+    for leave_a_result in results {
+        let mut form = form_with(&scratch, "report.pdf", 5);
+        leave_a_result(&mut form);
+        assert_ne!(form.status(), &Status::Idle);
+
+        form.choose([next.clone()]);
+
+        assert_eq!(chosen_path(&form), next);
+        assert_eq!(form.status(), &Status::Idle);
+    }
+}
 
 #[test]
 fn changing_the_form_clears_an_old_result() {

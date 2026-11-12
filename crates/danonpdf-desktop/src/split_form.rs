@@ -70,6 +70,18 @@ pub enum Mode {
     Split,
 }
 
+/// What "Extract…" is waiting for while it cannot be clicked, so the
+/// window can name the next thing to do and not just a thing that is
+/// missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtractNeeds {
+    /// No file is chosen yet.
+    File,
+    /// A file is chosen, but the text does not select pages of it: it is
+    /// empty, or it cannot be used.
+    Pages,
+}
+
 /// What the text in the pages field means for the chosen file.
 ///
 /// An enum and not a `bool` plus a message: the selection only exists when
@@ -337,12 +349,27 @@ impl SplitForm {
         }
     }
 
-    /// Whether "Extract…" has everything it needs: a file, and a text that
-    /// selects pages of it.
+    /// What "Extract…" is still waiting for, or `None` when it has
+    /// everything: a file, and a text that selects pages of it.
+    ///
+    /// The file comes first: while none is chosen the pages field cannot
+    /// even be typed in, so "type the pages" would be advice the user
+    /// cannot follow.
+    pub fn extract_needs(&self) -> Option<ExtractNeeds> {
+        if self.file.is_none() {
+            Some(ExtractNeeds::File)
+        } else if matches!(self.pages, PagesCheck::Selected { .. }) {
+            None
+        } else {
+            Some(ExtractNeeds::Pages)
+        }
+    }
+
+    /// Whether "Extract…" has everything it needs.
     pub fn can_extract(&self) -> bool {
-        // `Selected` only exists while a file is chosen, so one test covers
-        // both.
-        matches!(self.pages, PagesCheck::Selected { .. })
+        // Asked of `extract_needs` so that the button and the reason shown
+        // on it while it is disabled can never disagree.
+        self.extract_needs().is_none()
     }
 
     /// Whether "Split…" has everything it needs: a file. The number of

@@ -15,6 +15,8 @@
 //! in `merge_list.rs` and `split_form.rs`, where they are tested without a
 //! window.
 
+use std::path::PathBuf;
+
 use eframe::egui;
 
 use crate::dialogs;
@@ -65,18 +67,40 @@ impl eframe::App for DanonPdfApp {
         // Only the view that is shown is drawn. Nothing is hidden or kept
         // around for the other one: the next frame simply draws whichever
         // view `self.view` names by then.
-        match self.view {
+        //
+        // Each arm answers one question when it is done: is the status line
+        // it drew already out of date? The status panel has to be shown
+        // before the central panel (the order above), so a click in the
+        // central panel changes the status after its line was drawn. The
+        // arms keep a copy of what was drawn and compare it afterwards.
+        let status_is_stale = match self.view {
             View::Merge => {
                 egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui, frame));
+                let drawn = self.list.status().clone();
                 egui::Panel::bottom("status").show(ui, |ui| self.status_line(ui));
                 egui::CentralPanel::default().show(ui, |ui| self.file_list(ui));
+                self.list.status() != &drawn
             }
             View::Split => {
+                let drawn = self.split.status().clone();
                 egui::Panel::bottom("status")
                     .show(ui, |ui| split_view::status_line(ui, &self.split));
                 egui::CentralPanel::default()
                     .show(ui, |ui| split_view::show(ui, frame, &mut self.split));
+                self.split.status() != &drawn
             }
+        };
+
+        // egui only draws a new frame when something asks for one, usually
+        // the mouse or the keyboard. Without this, the old line could stay
+        // on screen until the mouse happened to move, so the result of
+        // "Extract…" would show up late or seem not to show up at all.
+        // Asking for one more frame does not depend on that luck: drawing the
+        // central panel first is not possible (it would take the strip the
+        // status line needs), and the frame is asked for only when the
+        // status really changed, so an idle window still draws nothing.
+        if status_is_stale {
+            ui.ctx().request_repaint();
         }
     }
 }
@@ -96,17 +120,28 @@ impl DanonPdfApp {
         });
     }
 
-    /// Hands the files dropped onto the window during this frame, if any,
-    /// to the view that is shown: the merge list adds them, the Split view
-    /// chooses one of them.
+    /// Asks egui for the files dropped onto the window during this frame
+    /// and hands them on. Reading them needs the `ui`; deciding where they
+    /// go does not, which is why that part is [`Self::take_files`].
     fn take_dropped_files(&mut self, ui: &egui::Ui) {
-        let dropped = drops::dropped_files(ui);
-        if dropped.is_empty() {
+        self.take_files(drops::dropped_files(ui));
+    }
+
+    /// Hands `files` to the view that is shown: the merge list adds them,
+    /// the Split view chooses one of them. The other view is not touched.
+    ///
+    /// It takes plain paths and no `ui`, so a test can drop files on the
+    /// app without a window.
+    fn take_files(&mut self, files: Vec<PathBuf>) {
+        // Nearly every frame brings no file. An empty list must not reach a
+        // view: both treat a call as something the user did, and would wipe
+        // their status line for it.
+        if files.is_empty() {
             return;
         }
         match self.view {
-            View::Merge => self.list.add(dropped),
-            View::Split => self.split.choose(dropped),
+            View::Merge => self.list.add(files),
+            View::Split => self.split.choose(files),
         }
     }
 
@@ -271,5 +306,98 @@ impl DanonPdfApp {
                 ui.colored_label(color, texts::merge_failed(message));
             }
         }
+    }
+}
+
+// The app struct holds no window and nothing of egui's, so what it decides
+// (which view gets the files that were dropped) is tested like the rest of
+// the state: by calling it.
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::test_support::ScratchDir;
+
+    /// A path inside a folder called `docs`. The merge list only looks at
+    /// names when files are added, so nothing has to exist there.
+    fn doc(name: &str) -> PathBuf {
+        Path::new("docs").join(name)
+    }
+
+    /// An app that shows the Split view. `..Default::default()` fills the
+    /// fields that are not named from the default app.
+    fn app_on_split() -> DanonPdfApp {
+        DanonPdfApp {
+            view: View::Split,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_window_opens_on_the_merge_view() {
+        assert_eq!(DanonPdfApp::default().view, View::Merge);
+    }
+
+    #[test]
+    fn files_dropped_on_the_merge_view_join_the_list_and_nothing_else() {
+        let mut app = DanonPdfApp::default();
+
+        app.take_files(vec![doc("a.pdf"), doc("b.pdf")]);
+
+        assert_eq!(app.list.files(), [doc("a.pdf"), doc("b.pdf")]);
+        assert_eq!(app.split.file(), None);
+    }
+
+    #[test]
+    fn files_dropped_on_the_split_view_choose_its_file_and_nothing_else() {
+        let scratch = ScratchDir::new("app-drop-on-split");
+        let report = scratch.pdf("report.pdf", 3);
+        let mut app = app_on_split();
+
+        app.take_files(vec![report.clone()]);
+
+        // `map` looks inside the `Option` to compare just the path.
+        assert_eq!(app.split.file().map(|file| &file.path), Some(&report));
+        assert!(app.list.files().is_empty());
+    }
+
+    #[test]
+    fn a_frame_without_dropped_files_reaches_neither_view() {
+        // Nearly every frame has no dropped file. If an empty list reached
+        // a view, it would count as an action of the user's and wipe the
+        // status line (here: the notice about a skipped file).
+        let mut app = DanonPdfApp::default();
+        app.take_files(vec![doc("photo.jpg")]);
+        let notice = app.list.status().clone();
+        assert_ne!(notice, Status::Idle);
+
+        app.take_files(Vec::new());
+        assert_eq!(app.list.status(), &notice);
+    }
+
+    #[test]
+    fn each_view_keeps_what_it_holds_while_the_other_is_shown() {
+        let scratch = ScratchDir::new("app-views-keep-state");
+        let report = scratch.pdf("report.pdf", 3);
+        let mut app = DanonPdfApp::default();
+
+        // Fill the Merge view, then work in the Split view.
+        app.take_files(vec![doc("a.pdf"), doc("b.pdf")]);
+        app.view = View::Split;
+        app.take_files(vec![report.clone()]);
+        app.split.set_pages_text("1-2".to_owned());
+
+        assert_eq!(app.list.files(), [doc("a.pdf"), doc("b.pdf")]);
+        assert!(app.list.can_merge());
+
+        // Back to Merge, and one more file for its list.
+        app.view = View::Merge;
+        app.take_files(vec![doc("c.pdf")]);
+
+        assert_eq!(app.list.files().len(), 3);
+        assert_eq!(app.split.file().map(|file| &file.path), Some(&report));
+        assert_eq!(app.split.pages_text(), "1-2");
+        assert!(app.split.can_extract());
     }
 }

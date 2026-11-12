@@ -34,7 +34,7 @@ What the view does and does not do:
 - **The chosen file is only read.** Neither button writes over it (a hard link to it is not recognised).
 - **Extract** treats the name you choose as Merge does: it adds `.pdf` to a name without it, and then does not write when a file with that name already exists.
 - **Split** checks every name before it writes anything. If one already exists in the folder, it writes nothing and names the first one: choose another folder, or an empty one. The window never replaces the files of an earlier split; `danonpdf-cli split --force` does.
-- If a split cannot save a file halfway through, it stops, keeps the files already written and says how many there are.
+- If a split cannot save a file halfway through, it stops, keeps the files already written and says how many there are. To try again, choose another folder or empty that one first: the files that were kept have the names the new split would use.
 
 Both run while the window waits, like a merge. What the new files do not keep is listed under [Limits](#limits).
 

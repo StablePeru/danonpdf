@@ -14,7 +14,7 @@ use eframe::egui;
 use crate::dialogs;
 use crate::drops;
 use crate::paths::display_name;
-use crate::split_form::{Mode, PagesCheck, SplitForm, Status};
+use crate::split_form::{ExtractNeeds, Mode, PagesCheck, SplitForm, Status};
 use crate::texts;
 
 /// The least height of the drop zone, in egui points: two lines of text
@@ -159,10 +159,19 @@ fn extract_controls(ui: &mut egui::Ui, frame: &eframe::Frame, form: &mut SplitFo
         }
     };
 
+    // What the button says while it cannot be clicked depends on what is
+    // missing. Without a file the pages field is disabled too, so the only
+    // advice that can be followed then is to choose one.
+    let disabled_hint = match form.extract_needs() {
+        Some(ExtractNeeds::File) => texts::NEEDS_FILE,
+        // `None` is the enabled button, which never shows this text; it
+        // shares an arm so the `match` still names every case.
+        Some(ExtractNeeds::Pages) | None => texts::EXTRACT_NEEDS_PAGES,
+    };
     let extract = ui
         .add_enabled(form.can_extract(), egui::Button::new(texts::EXTRACT_BUTTON))
         .on_hover_text(texts::EXTRACT_HINT)
-        .on_disabled_hover_text(texts::EXTRACT_NEEDS_PAGES);
+        .on_disabled_hover_text(disabled_hint);
     // The name to propose is only worked out once the button is clicked
     // (it asks the disk which names are taken). The extraction then runs
     // right here, on the thread that draws the window, so the window does
