@@ -7,6 +7,16 @@
 #   dist/licenses/pdfium/  the licence texts that must travel with that DLL
 # Meant to run inside the build container:
 #   docker compose run --rm build bash scripts/build-windows.sh
+#
+# The order of the steps is the point of the script:
+#   1. Everything that does not come out of the build is checked first, so
+#      a missing tool or a wrong PDFium folder stops it in a second and not
+#      after a long build.
+#   2. The build.
+#   3. The two programs are checked.
+#   4. Only then is dist/ changed, in an order that never leaves pdfium.dll
+#      there without its licence texts.
+# A run that stops in steps 1 to 3 leaves dist/ exactly as it was.
 set -euo pipefail
 
 target=x86_64-pc-windows-gnu
@@ -14,7 +24,7 @@ target=x86_64-pc-windows-gnu
 # Run from the repository root, wherever the script is called from.
 cd "$(dirname "$0")/.."
 
-# `file` checks the results below. The build image installs it (see the
+# `file` checks the binaries below. The build image installs it (see the
 # Dockerfile); outside it, say what is missing before a long build instead
 # of failing with "command not found" at the end.
 if ! command -v file > /dev/null; then
@@ -24,22 +34,16 @@ fi
 
 # Where the Windows build of PDFium was unpacked. The build image puts it
 # here (see the Dockerfile); the variable is for running the script anywhere
-# else. Checked before the build for the same reason as `file`.
+# else. The list is everything that step 4 copies from that folder: the
+# library, and the three things that make up its licence folder. Checked
+# before the build for the same reason as `file`.
 pdfium="${DANONPDF_PDFIUM_WINDOWS_DIR:-/opt/pdfium/windows}"
-for needed in bin/pdfium.dll LICENSE licenses; do
+for needed in bin/pdfium.dll LICENSE VERSION licenses; do
     if [[ ! -e "$pdfium/$needed" ]]; then
         echo "error: $pdfium/$needed is missing; rebuild the image (docker compose build) or set DANONPDF_PDFIUM_WINDOWS_DIR" >&2
         exit 1
     fi
 done
-
-# One cargo call for both packages, so what they share (the core, lopdf) is
-# compiled once.
-cargo build --release --locked --target "$target" -p danonpdf-desktop -p danonpdf-cli
-
-# Inside Docker, CARGO_TARGET_DIR points to a named volume outside the
-# checkout; elsewhere Cargo uses ./target.
-release="${CARGO_TARGET_DIR:-target}/$target/release"
 
 # Checks that the file $1 is a 64-bit Windows binary (PE32+) of the kind
 # $2, "GUI", "console" or "DLL", and stores what `file` says about it in
@@ -53,11 +57,17 @@ release="${CARGO_TARGET_DIR:-target}/$target/release"
 # black console next to its window, and the tool would have no stdout for a
 # script to read. And a 32-bit or ARM pdfium.dll would sit next to the
 # programs looking right, and fail to load only when a page is drawn.
+#
+# $3 is optional: words to put in front of "<file> does not exist", for a
+# file whose absence says more than its name does. The two programs pass
+# "cargo finished but ": cargo reported success, so a missing .exe means
+# that the build wrote somewhere else (a target folder or a package name
+# that changed), not that the build failed.
 verify() {
-    local binary=$1 kind=$2
+    local binary=$1 kind=$2 context=${3:-}
 
     if [[ ! -f "$binary" ]]; then
-        echo "error: $binary does not exist" >&2
+        echo "error: ${context}$binary does not exist" >&2
         exit 1
     fi
 
@@ -68,26 +78,61 @@ verify() {
     fi
 }
 
-# Check all three before copying any, so dist/ only ever receives verified
-# files and is left untouched when one of them is wrong.
-verify "$release/danonpdf.exe" GUI
-gui_description=$description
-verify "$release/danonpdf-cli.exe" console
-cli_description=$description
+# The DLL does not come out of the build, so it is checked before it.
 verify "$pdfium/bin/pdfium.dll" DLL
 dll_description=$description
 
-mkdir -p dist
-cp "$release/danonpdf.exe" "$release/danonpdf-cli.exe" "$pdfium/bin/pdfium.dll" dist/
+# One cargo call for both packages, so what they share (the core, lopdf) is
+# compiled once.
+cargo build --release --locked --target "$target" -p danonpdf-desktop -p danonpdf-cli
 
-# PDFium's licences ask for their text to go with every binary copy, so the
-# DLL never reaches dist/ without them. The folder is laid out as in the
-# archive it came from (LICENSE points at "the licenses/ directory"), and
-# VERSION says which PDFium build the DLL is. It is removed first: a file
-# that a newer PDFium no longer ships must not stay from an earlier build.
+# Inside Docker, CARGO_TARGET_DIR points to a named volume outside the
+# checkout; elsewhere Cargo uses ./target.
+release="${CARGO_TARGET_DIR:-target}/$target/release"
+
+# With the DLL above, all three binaries are checked before any is copied:
+# dist/ only ever receives verified files.
+verify "$release/danonpdf.exe" GUI "cargo finished but "
+gui_description=$description
+verify "$release/danonpdf-cli.exe" console "cargo finished but "
+cli_description=$description
+
+# Copies the file $1 to $2 under a temporary name and renames it into
+# place. A copy takes time and a rename does not: if the script is stopped
+# halfway, $2 is the old file or the new one, never the first half of one.
+install_file() {
+    cp "$1" "$2.new"
+    mv -f "$2.new" "$2"
+}
+
+mkdir -p dist/licenses
+# Left over from a run that was stopped during the steps below.
+rm -rf dist/*.new dist/licenses/pdfium.new
+
+# PDFium's licences ask for their text to go with every binary copy, so
+# dist/ must never hold pdfium.dll without them, not even if the script is
+# stopped at any line from here on:
+#
+# 1. The new licence folder is put together under a temporary name. The
+#    DLL and the licences of an earlier build are still in place, whole.
+# 2. The old DLL is removed, before its licences are touched.
+# 3. The licence folder is replaced. The old one is removed whole and not
+#    copied over: a file that a newer PDFium no longer ships must not stay
+#    from an earlier build.
+# 4. The new DLL arrives last, with its licences already there.
+#
+# The folder is laid out as in the archive it came from (LICENSE points at
+# "the licenses/ directory"), and VERSION says which PDFium build the DLL
+# is.
+mkdir dist/licenses/pdfium.new
+cp -r "$pdfium/LICENSE" "$pdfium/VERSION" "$pdfium/licenses" dist/licenses/pdfium.new/
+rm -f dist/pdfium.dll
 rm -rf dist/licenses/pdfium
-mkdir -p dist/licenses/pdfium
-cp -r "$pdfium/LICENSE" "$pdfium/VERSION" "$pdfium/licenses" dist/licenses/pdfium/
+mv dist/licenses/pdfium.new dist/licenses/pdfium
+install_file "$pdfium/bin/pdfium.dll" dist/pdfium.dll
+
+install_file "$release/danonpdf.exe" dist/danonpdf.exe
+install_file "$release/danonpdf-cli.exe" dist/danonpdf-cli.exe
 
 echo "Built dist/danonpdf.exe: $gui_description"
 echo "Built dist/danonpdf-cli.exe: $cli_description"

@@ -44,11 +44,29 @@ ARG PDFIUM_WIN_X64_SHA256=9a964261760cff52570aabf038ab346d3a5034dd8b30d0d5fe8861
 # The last lines check what was unpacked, not only what was downloaded: that
 # VERSION names the build asked for, and that each library is of the kind
 # its folder says (`file` exits 0 whatever it finds, hence the grep).
+#
+# The download itself is allowed to stumble, within limits:
+# - --proto and --proto-redir: HTTPS only, for the address given and for
+#   every address a redirect leads to (GitHub answers with a redirect to
+#   its file servers). Without the second one, a redirect could step down
+#   to plain HTTP.
+# - --connect-timeout, --max-time: 30 seconds to connect and 5 minutes for
+#   one attempt (the archives are about 4 MB each), so a connection that
+#   stalls ends as an error instead of hanging the build for ever.
+# - --retry: an attempt that fails for a reason that may pass (a timeout, a
+#   server error) is made again, up to 3 more times, 5 seconds apart. Each
+#   attempt starts the file from scratch. --retry-max-time ends the
+#   retrying after 15 minutes, whatever the count says.
+# None of this decides whether a file is trusted: the SHA-256 check below
+# is still the only gate.
 RUN set -eu; \
     base="https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F${PDFIUM_BUILD}"; \
     cd /tmp; \
     for archive in pdfium-linux-x64.tgz pdfium-win-x64.tgz; do \
-        curl --fail --silent --show-error --location --proto '=https' \
+        curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' \
+            --connect-timeout 30 --max-time 300 \
+            --retry 3 --retry-delay 5 --retry-max-time 900 \
             --output "$archive" "$base/$archive"; \
     done; \
     printf '%s  %s\n' \
