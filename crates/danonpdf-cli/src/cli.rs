@@ -13,29 +13,38 @@
 //! - `--help`, `-h` and `help <command>` print the help on stdout and end
 //!   the program with exit code 0. So does `--version`.
 //! - A command line that breaks the rules below (no `--output`, an unknown
-//!   flag) prints a message on stderr and ends the program with exit code
-//!   2. This happens before the tool knows whether `--json` was given, so a
-//!   usage error is always plain text, never JSON.
+//!   flag, a `--pages` that cannot be read) prints a message on stderr and
+//!   ends the program with exit code 2. This happens before the tool knows
+//!   whether `--json` was given, so a usage error is always plain text,
+//!   never JSON.
+//!
+//! clap also turns the text of an argument into the type of its field, and
+//! a text that does not fit the type is a usage error like any other. That
+//! is how `--pages` is checked: its field is a `PageSelection`, the core
+//! knows how to read one from text, and what the core refuses clap reports.
 //!
 //! One rule is checked here and not by clap: "at least two inputs" (see
 //! [`MergeArgs::check`]). It is reported through clap all the same, so it
 //! looks and ends like every other usage error.
 
 use std::ffi::OsString;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand};
+use danonpdf_core::PageSelection;
 
+use crate::outcome::Operation;
 use crate::texts;
 
 /// A merge of fewer files than this is a mistake in the command line.
 const MIN_INPUTS: usize = 2;
 
 // The part of the help that a caller needs to use the tool without reading
-// anything else: an example, the rules, the exit codes and the JSON shapes.
-// It is shown under both `danonpdf-cli --help` and `danonpdf-cli merge
-// --help`, so whichever one an agent tries first, it finds the whole
+// anything else: examples, the rules, the exit codes and the JSON shapes.
+// It is shown under `danonpdf-cli --help` and under the `--help` of every
+// command, so whichever one an agent tries first, it finds the whole
 // contract.
 //
 // `r#"..."#` is a raw string: quotes and backslashes inside it are plain
@@ -43,15 +52,39 @@ const MIN_INPUTS: usize = 2;
 //
 // The lines are kept under 80 columns by hand, except the JSON examples,
 // which must stay on one line to be copied.
-const CONTRACT: &str = r#"Example:
+const CONTRACT: &str = r#"Examples:
   danonpdf-cli merge --json --output merged.pdf first.pdf second.pdf
+  danonpdf-cli info --json report.pdf
+  danonpdf-cli extract --json --pages 1-3,7,10- --output part.pdf report.pdf
+  danonpdf-cli split --json --every 10 --output-dir parts report.pdf
+
+Pages (the --pages of extract):
+  A list of items separated by commas. Pages are counted from 1.
+    N    page N
+    A-B  pages A to B, both included; A must not be above B
+    A-   page A and every page after it
+  Example: 1-3,7,10- takes pages 1, 2, 3 and 7, and from 10 to the last.
+  The pages are written in the order given: 3,1 puts page 3 first. Spaces
+  around an item are ignored. No page may be listed twice (1-5,3 is
+  refused).
+  A list that cannot be read (empty, an empty item, not a number, page 0,
+  a backwards range such as 5-3, a page listed twice) is a usage error:
+  exit code 2. A page past the end of the document is found only once the
+  file is open: exit code 1, error code page_out_of_range. Run info first
+  to learn how many pages a file has.
 
 Rules:
-  - Every input is read, in the order given. None is skipped for its name,
-    and the same file given twice is merged twice.
-  - The output path is used exactly as given: no extension is added.
-  - The output is never one of the inputs, not even with --force.
+  - Every input is read as given: none is skipped for its name, and merge
+    reads the same file twice when it is given twice.
+  - Output paths are used exactly as given: no extension is added.
+  - An output is never an input, not even with --force.
   - An existing output is replaced only with --force.
+  - split writes <name of the input without its extension>-<NNN>.pdf into
+    --output-dir, which it creates if it is missing: report-001.pdf,
+    report-002.pdf... (four digits or more from a thousand files on).
+    --every N puts N pages in each file; the last one may have fewer.
+    Every name is checked before anything is written: if one is taken and
+    --force was not given, nothing is written at all.
   - The tool never asks a question, never reads stdin and never uses the
     network.
 
@@ -68,33 +101,44 @@ Output without --json:
 
 Output with --json:
   Exactly one JSON object on one line of stdout, and nothing on stderr, for
-  a success and for a failure alike.
-  success:
+  a success and for a failure alike. "ok" and "operation" come first.
+  success, one shape per command:
   {"ok":true,"operation":"merge","output":"merged.pdf","inputs":2,"pages":12}
-  failure:
+  {"ok":true,"operation":"info","input":"report.pdf","pages":12}
+  {"ok":true,"operation":"extract","output":"part.pdf","pages":7}
+  {"ok":true,"operation":"split","outputs":["parts/report-001.pdf","parts/report-002.pdf"],"files":2,"pages":12}
+  failure, one shape for every command:
   {"ok":false,"operation":"merge","error":{"code":"output_exists","message":"...","path":"merged.pdf"}}
-  "output" is the path as given, "inputs" the number of files read and
-  "pages" the number of pages written. "message" is for people; "path" is
+  "input", "output" and "outputs" are paths as given, "outputs" in page
+  order. "inputs" is the number of files read and "files" the number of
+  files written. "pages" is the number of pages of the input (info, split)
+  or of the output (merge, extract). "message" is for people; "path" is
   the file the error is about, and the key is left out when there is none.
+  A split that stops after writing some of its files adds "written" to
+  "error": the files already written, in order. They are complete and are
+  kept, and "path" is the file that failed. No other failure has the key.
   A path that is not valid Unicode is written with replacement characters.
   A usage error (exit code 2) is never JSON: the argument parser prints
   plain text on stderr, also when --json was given.
 
 Error codes (stable: test for these, not for the message):
-  output_is_input  the output is one of the inputs
-  output_exists    the output already exists and --force was not given
-  no_inputs        there was nothing to merge; never reported by this
-                   command line, which refuses fewer than two inputs first
-                   as a usage error (exit code 2, plain text on stderr)
-  read_failed      an input could not be read, or is not a PDF
-  encrypted        an input needs a password
-  broken_pdf       an input opened, but its structure is damaged
-  save_failed      the merged file could not be written"#;
+  output_is_input    an output is one of the inputs
+  output_exists      an output already exists and --force was not given
+  no_inputs          there was nothing to merge; never reported by this
+                     command line, which refuses fewer than two inputs first
+                     as a usage error (exit code 2, plain text on stderr)
+  read_failed        an input could not be read, or is not a PDF
+  encrypted          an input needs a password
+  broken_pdf         an input opened, but its structure is damaged
+  page_out_of_range  --pages names a page past the end of the document
+  save_failed        an output file, or the folder for it, could not be
+                     written"#;
 
 // Shown under the short help (`-h`), which leaves the contract out.
-const HELP_POINTER: &str = "Run with --help for an example, the exit codes and the JSON output.";
+const HELP_POINTER: &str =
+    "Run with --help for examples, the page syntax, the exit codes and the JSON output.";
 
-/// Merge PDF files from the command line: local, no network, no questions
+/// Merge, split and inspect PDF files: local, no network, no questions
 ///
 /// DanonPDF for scripts and AI agents. It does one operation per run, never
 /// waits for input, and reports the result as a line of text or, with
@@ -142,8 +186,11 @@ impl Cli {
     {
         let cli = Self::try_parse_from(args)?;
         // One arm per command, each with the checks that clap cannot do.
+        // Only a merge has one; the other three are named all the same, so
+        // that a new command has to be placed here on purpose.
         match &cli.command {
             Command::Merge(merge) => merge.check()?,
+            Command::Info(_) | Command::Extract(_) | Command::Split(_) => {}
         }
         Ok(cli)
     }
@@ -151,11 +198,58 @@ impl Cli {
 
 // An enum with one variant per command. `main` matches on it, so adding a
 // command here makes the compiler point at the place that must handle it.
+//
+// `name = ...` gives each command the name of its operation. clap would
+// otherwise make the name from the variant ("Merge" becomes "merge"), which
+// gives the same words today; taking them from `Operation` means the
+// command typed and the "operation" in the JSON report come from one place.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Merge PDF files, in the order given, into one new file
-    #[command(after_help = HELP_POINTER, after_long_help = CONTRACT)]
+    #[command(
+        name = Operation::Merge.name(),
+        after_help = HELP_POINTER,
+        after_long_help = CONTRACT
+    )]
     Merge(MergeArgs),
+
+    /// Say how many pages a PDF file has
+    #[command(
+        name = Operation::Info.name(),
+        after_help = HELP_POINTER,
+        after_long_help = CONTRACT
+    )]
+    Info(InfoArgs),
+
+    /// Copy chosen pages of a PDF file, in the order given, into a new file
+    #[command(
+        name = Operation::Extract.name(),
+        after_help = HELP_POINTER,
+        after_long_help = CONTRACT
+    )]
+    Extract(ExtractArgs),
+
+    /// Split a PDF file into files of N pages each (one page by default)
+    #[command(
+        name = Operation::Split.name(),
+        after_help = HELP_POINTER,
+        after_long_help = CONTRACT
+    )]
+    Split(SplitArgs),
+}
+
+impl Command {
+    /// The operation this command runs.
+    pub fn operation(&self) -> Operation {
+        // `_` inside a variant ignores what it holds: only which variant
+        // it is matters here.
+        match self {
+            Self::Merge(_) => Operation::Merge,
+            Self::Info(_) => Operation::Info,
+            Self::Extract(_) => Operation::Extract,
+            Self::Split(_) => Operation::Split,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -200,13 +294,100 @@ impl MergeArgs {
         // merge" that the usage line shows.
         let mut command = Cli::command();
         command.build();
-        Err(match command.find_subcommand_mut("merge") {
+        Err(match command.find_subcommand_mut(Operation::Merge.name()) {
             Some(merge) => merge.error(ErrorKind::TooFewValues, message),
-            // Only if the command is renamed without updating the line
-            // above; the error is then still reported, with a plainer usage.
+            // Not reached: the command is named after the same
+            // operation above. If it ever is, the error is still
+            // reported, with a plainer usage line.
             None => command.error(ErrorKind::TooFewValues, message),
         })
     }
+}
+
+#[derive(Debug, Args)]
+pub struct InfoArgs {
+    /// Print the result as one JSON object on stdout, also when it fails
+    #[arg(long)]
+    pub json: bool,
+
+    /// The PDF file to look at
+    // One `PathBuf` and not a `Vec`: clap then takes exactly one input and
+    // refuses a second one as a usage error.
+    #[arg(value_name = "INPUT")]
+    pub input: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct ExtractArgs {
+    /// The pages to take, in this order: for example 1-3,7,10-
+    // The field is a `PageSelection`, not a `String`. clap sees that the
+    // type can be read from text (it implements `FromStr`, in the core) and
+    // does so while it parses. A text the core refuses becomes a usage
+    // error with the core's own reason in it, and this struct can only
+    // ever hold a selection that is well formed.
+    #[arg(long, value_name = "PAGES")]
+    pub pages: PageSelection,
+
+    /// Where to write the new PDF; the path is used exactly as given
+    #[arg(long, value_name = "FILE")]
+    pub output: PathBuf,
+
+    /// Replace the output if it already exists (it may never be the input)
+    #[arg(long)]
+    pub force: bool,
+
+    /// Print the result as one JSON object on stdout, also when it fails
+    #[arg(long)]
+    pub json: bool,
+
+    /// The PDF file to take the pages from
+    #[arg(value_name = "INPUT")]
+    pub input: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct SplitArgs {
+    /// How many pages go into each file; the last file may have fewer
+    // `NonZeroUsize` is a whole number that cannot be 0, so "a file every 0
+    // pages" never gets past the parser. `default_value_t` is the value
+    // when the flag is absent: `MIN` is the smallest one there is, 1, which
+    // means one file per page. `value_parser` names the function that
+    // reads the text, for the sake of its error message.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = NonZeroUsize::MIN,
+        value_parser = pages_per_file
+    )]
+    pub every: NonZeroUsize,
+
+    /// The folder for the new files; it is created if it does not exist
+    // clap names the flag after the field, with a dash for the underscore:
+    // `--output-dir`.
+    #[arg(long, value_name = "DIR")]
+    pub output_dir: PathBuf,
+
+    /// Replace files that already exist (none may ever be the input)
+    #[arg(long)]
+    pub force: bool,
+
+    /// Print the result as one JSON object on stdout, also when it fails
+    #[arg(long)]
+    pub json: bool,
+
+    /// The PDF file to split
+    #[arg(value_name = "INPUT")]
+    pub input: PathBuf,
+}
+
+/// Reads the value of `--every`.
+///
+/// `text.parse()` alone would do: it already refuses 0, a fraction and
+/// anything that is not a number. But its own reasons are written for
+/// programmers ("number would be zero for non-zero type"). `map_err` swaps
+/// whatever the reason was for one sentence that says what is wanted.
+fn pages_per_file(text: &str) -> Result<NonZeroUsize, String> {
+    text.parse().map_err(|_| texts::not_a_page_count())
 }
 
 #[cfg(test)]
@@ -220,11 +401,29 @@ mod tests {
 
     /// The arguments of the `merge` command in `args`.
     fn merge_args(args: &[&str]) -> MergeArgs {
-        // A `match` with one arm today. A second command will make this
-        // stop compiling, which is the reminder to handle it.
-        match parse(args).unwrap().command {
-            Command::Merge(merge) => merge,
-        }
+        // `let ... else`: a pattern that may not match, with what to do
+        // when it does not. It reads better than a `match` when only one
+        // variant is of interest.
+        let Command::Merge(merge) = parse(args).unwrap().command else {
+            panic!("{args:?} is not a merge");
+        };
+        merge
+    }
+
+    /// The arguments of the `extract` command in `args`.
+    fn extract_args(args: &[&str]) -> ExtractArgs {
+        let Command::Extract(extract) = parse(args).unwrap().command else {
+            panic!("{args:?} is not an extract");
+        };
+        extract
+    }
+
+    /// The arguments of the `split` command in `args`.
+    fn split_args(args: &[&str]) -> SplitArgs {
+        let Command::Split(split) = parse(args).unwrap().command else {
+            panic!("{args:?} is not a split");
+        };
+        split
     }
 
     #[test]
@@ -234,6 +433,33 @@ mod tests {
         // This builds it once, so they fail here and not in front of a user.
         Cli::command().debug_assert();
     }
+
+    #[test]
+    fn every_command_is_named_after_its_operation() {
+        // A smallest valid command line for each command, starting with the
+        // name of its operation. If the name typed and the operation ever
+        // came apart, the line would not parse, or would run another one.
+        let lines: [(Operation, &[&str]); 4] = [
+            (Operation::Merge, &["--output", "o.pdf", "a.pdf", "b.pdf"]),
+            (Operation::Info, &["a.pdf"]),
+            (
+                Operation::Extract,
+                &["--pages", "1", "--output", "o.pdf", "a.pdf"],
+            ),
+            (Operation::Split, &["--output-dir", "parts", "a.pdf"]),
+        ];
+        for (operation, rest) in lines {
+            let args: Vec<&str> = std::iter::once(operation.name())
+                .chain(rest.iter().copied())
+                .collect();
+
+            let cli = parse(&args).unwrap();
+
+            assert_eq!(cli.command.operation(), operation, "{args:?}");
+        }
+    }
+
+    // merge
 
     #[test]
     fn merge_takes_the_output_and_the_inputs_in_order() {
@@ -304,6 +530,147 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::TooFewValues);
         assert_eq!(error.exit_code(), 2);
     }
+
+    // info
+
+    #[test]
+    fn info_takes_exactly_one_input() {
+        let Command::Info(info) = parse(&["info", "a.pdf"]).unwrap().command else {
+            panic!("not an info");
+        };
+        assert_eq!(info.input, PathBuf::from("a.pdf"));
+        assert!(!info.json, "--json must be off unless given");
+
+        let none = parse(&["info"]).unwrap_err();
+        assert_eq!(none.kind(), ErrorKind::MissingRequiredArgument);
+        let two = parse(&["info", "a.pdf", "b.pdf"]).unwrap_err();
+        assert_eq!(two.kind(), ErrorKind::UnknownArgument);
+        assert_eq!(two.exit_code(), 2);
+    }
+
+    // extract
+
+    #[test]
+    fn extract_reads_the_pages_into_a_selection() {
+        let extract = extract_args(&[
+            "extract", "--pages", "3,1-2", "--output", "out.pdf", "in.pdf",
+        ]);
+
+        // Already a selection, not text: resolved against a 5-page
+        // document, it gives the pages in the order written.
+        assert_eq!(extract.pages.resolve(5).unwrap(), [3, 1, 2]);
+        assert_eq!(extract.output, PathBuf::from("out.pdf"));
+        assert_eq!(extract.input, PathBuf::from("in.pdf"));
+        assert!(!extract.force, "--force must be off unless given");
+        assert!(!extract.json, "--json must be off unless given");
+    }
+
+    #[test]
+    fn pages_that_cannot_be_read_are_a_usage_error() {
+        // One text per rule of the syntax, each with a few words of the
+        // core's reason: the same sentence reaches the user through clap.
+        let cases = [
+            ("", "no pages were given"),
+            ("1,,3", "item 2 of the page list is empty"),
+            ("abc", "is not a page"),
+            ("0", "there is no page 0"),
+            ("5-3", "runs backwards"),
+            ("1-5,3", "page 3 is listed more than once"),
+        ];
+        for (pages, reason) in cases {
+            let error = parse(&[
+                "extract", "--json", "--pages", pages, "--output", "out.pdf", "in.pdf",
+            ])
+            .unwrap_err();
+
+            assert_eq!(error.kind(), ErrorKind::ValueValidation, "{pages:?}");
+            assert_eq!(error.exit_code(), 2, "{pages:?}");
+            let text = error.to_string();
+            assert!(text.contains("--pages <PAGES>"), "{pages:?} gave: {text}");
+            assert!(text.contains(reason), "{pages:?} gave: {text}");
+        }
+    }
+
+    #[test]
+    fn a_page_past_the_end_is_not_a_usage_error() {
+        // Nothing in the text is wrong, and the parser has no document to
+        // count: page 9999 is refused later, by the core, with exit code 1.
+        let extract = extract_args(&[
+            "extract", "--pages", "9999", "--output", "out.pdf", "in.pdf",
+        ]);
+
+        assert!(extract.pages.resolve(5).is_err());
+    }
+
+    #[test]
+    fn extract_needs_pages_an_output_and_one_input() {
+        let lines: [&[&str]; 4] = [
+            &["extract", "--output", "out.pdf", "in.pdf"],
+            &["extract", "--pages", "1", "in.pdf"],
+            &["extract", "--pages", "1", "--output", "out.pdf"],
+            &[
+                "extract", "--pages", "1", "--output", "o.pdf", "a.pdf", "b.pdf",
+            ],
+        ];
+        for line in lines {
+            let error = parse(line).unwrap_err();
+
+            assert_eq!(error.exit_code(), 2, "{line:?}");
+        }
+    }
+
+    // split
+
+    #[test]
+    fn split_puts_one_page_in_each_file_unless_told_otherwise() {
+        let split = split_args(&["split", "--output-dir", "parts", "in.pdf"]);
+
+        assert_eq!(split.every.get(), 1);
+        assert_eq!(split.output_dir, PathBuf::from("parts"));
+        assert_eq!(split.input, PathBuf::from("in.pdf"));
+        assert!(!split.force, "--force must be off unless given");
+        assert!(!split.json, "--json must be off unless given");
+
+        let split = split_args(&["split", "--every", "10", "--output-dir", "parts", "in.pdf"]);
+        assert_eq!(split.every.get(), 10);
+    }
+
+    #[test]
+    fn every_must_be_a_whole_number_from_1_up() {
+        for every in ["0", "abc", "1.5", "", "+"] {
+            let error =
+                parse(&["split", "--every", every, "--output-dir", "parts", "in.pdf"]).unwrap_err();
+
+            assert_eq!(error.kind(), ErrorKind::ValueValidation, "{every:?}");
+            assert_eq!(error.exit_code(), 2, "{every:?}");
+            let text = error.to_string();
+            assert!(
+                text.contains("must be a whole number, 1 or more"),
+                "{every:?} gave: {text}"
+            );
+        }
+        // A negative number looks like a flag to the parser, which refuses
+        // it one step earlier. It is a usage error all the same.
+        let negative =
+            parse(&["split", "--every", "-1", "--output-dir", "parts", "in.pdf"]).unwrap_err();
+        assert_eq!(negative.exit_code(), 2);
+    }
+
+    #[test]
+    fn split_needs_an_output_folder_and_one_input() {
+        let lines: [&[&str]; 3] = [
+            &["split", "in.pdf"],
+            &["split", "--output-dir", "parts"],
+            &["split", "--output-dir", "parts", "a.pdf", "b.pdf"],
+        ];
+        for line in lines {
+            let error = parse(line).unwrap_err();
+
+            assert_eq!(error.exit_code(), 2, "{line:?}");
+        }
+    }
+
+    // Help and version
 
     #[test]
     fn help_and_version_end_with_success() {

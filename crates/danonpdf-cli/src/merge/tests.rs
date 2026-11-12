@@ -3,12 +3,13 @@
 //! checked where a failure points straight at the rule.
 
 use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use lopdf::{Document, Object, dictionary};
 
 use super::*;
+use crate::outcome::ErrorCode;
+use crate::texts;
 
 /// A folder under the system temp folder, deleted again when the value is
 /// dropped, so a failing test does not leave files behind either.
@@ -74,7 +75,7 @@ fn run_reports_the_inputs_the_pages_and_the_output_as_given() {
 
     assert_eq!(
         report,
-        MergeReport {
+        Report::Merge {
             output: output.clone(),
             inputs: 2,
             pages: 5,
@@ -117,7 +118,14 @@ fn existing_output_is_refused_unless_forced() {
 
     // The same call with `force` replaces it.
     let report = run(&inputs, &output, true).unwrap();
-    assert_eq!(report.pages, 2);
+    assert_eq!(
+        report,
+        Report::Merge {
+            output: output.clone(),
+            inputs: 2,
+            pages: 2,
+        }
+    );
     assert_ne!(fs::read(&output).unwrap(), b"someone else's file");
 }
 
@@ -158,104 +166,4 @@ fn a_failure_in_the_core_keeps_its_whole_chain_of_causes() {
         failure.message
     );
     assert!(!output.exists(), "nothing should be written");
-}
-
-// From the core's errors to the tool's codes
-
-/// The two inputs every case below was "called" with.
-fn two_inputs() -> [PathBuf; 2] {
-    [PathBuf::from("first.pdf"), PathBuf::from("second.pdf")]
-}
-
-#[test]
-fn every_merge_error_has_a_code_and_names_its_file() {
-    // One case per variant of `PdfError`. If the core grows a variant,
-    // the `match` in `failure_from` (which has no `_` arm) stops compiling,
-    // so this test cannot pass until the new variant has a code. Add its
-    // case here at the same time.
-    let cases: [(PdfError, ErrorCode, Option<&str>); 7] = [
-        (PdfError::NoInputs, ErrorCode::NoInputs, None),
-        (
-            PdfError::Read {
-                path: PathBuf::from("second.pdf"),
-                source: lopdf::Error::InvalidPassword,
-            },
-            ErrorCode::ReadFailed,
-            Some("second.pdf"),
-        ),
-        (
-            PdfError::Encrypted { input: 2 },
-            ErrorCode::Encrypted,
-            Some("second.pdf"),
-        ),
-        (
-            PdfError::Broken {
-                input: 1,
-                reason: "it has no catalog",
-            },
-            ErrorCode::BrokenPdf,
-            Some("first.pdf"),
-        ),
-        (
-            PdfError::PageOutOfRange { page: 9, pages: 5 },
-            ErrorCode::PageOutOfRange,
-            None,
-        ),
-        (
-            PdfError::CreateFolder {
-                path: PathBuf::from("parts"),
-                source: io::Error::new(io::ErrorKind::PermissionDenied, "access denied"),
-            },
-            ErrorCode::SaveFailed,
-            Some("parts"),
-        ),
-        (
-            PdfError::Save {
-                path: PathBuf::from("out.pdf"),
-                source: io::Error::new(io::ErrorKind::PermissionDenied, "access denied"),
-            },
-            ErrorCode::SaveFailed,
-            Some("out.pdf"),
-        ),
-    ];
-
-    for (error, code, path) in cases {
-        let failure = failure_from(&error, &two_inputs());
-
-        assert_eq!(failure.code, code, "{error:?}");
-        assert_eq!(failure.path.as_deref(), path.map(Path::new), "{error:?}");
-        assert_eq!(failure.message, error_chain(&error), "{error:?}");
-    }
-}
-
-#[test]
-fn an_input_number_outside_the_list_names_no_file() {
-    // The core counts inputs from 1, so 0 is never a real input, and 3 is
-    // past the end of a list of two. Neither may panic or name a wrong file.
-    for input in [0, 3] {
-        let failure = failure_from(&PdfError::Encrypted { input }, &two_inputs());
-
-        assert_eq!(failure.code, ErrorCode::Encrypted);
-        assert_eq!(failure.path, None, "input {input}");
-    }
-}
-
-#[test]
-fn error_codes_are_spelled_as_documented() {
-    // These strings are the contract with every caller. Changing one here
-    // means changing the help, the README and AGENTS.md, and breaking the
-    // scripts that test for it.
-    let codes = [
-        (ErrorCode::OutputIsInput, "output_is_input"),
-        (ErrorCode::OutputExists, "output_exists"),
-        (ErrorCode::NoInputs, "no_inputs"),
-        (ErrorCode::ReadFailed, "read_failed"),
-        (ErrorCode::Encrypted, "encrypted"),
-        (ErrorCode::BrokenPdf, "broken_pdf"),
-        (ErrorCode::PageOutOfRange, "page_out_of_range"),
-        (ErrorCode::SaveFailed, "save_failed"),
-    ];
-    for (code, text) in codes {
-        assert_eq!(code.as_str(), text);
-    }
 }

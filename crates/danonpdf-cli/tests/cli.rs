@@ -43,6 +43,38 @@ fn merge(flags: &[&str], output: &Path, inputs: &[&Path]) -> Output {
     cli(&args)
 }
 
+/// Runs `danonpdf-cli info <flags> <input>`.
+fn info(flags: &[&str], input: &Path) -> Output {
+    let mut args: Vec<&OsStr> = vec![OsStr::new("info")];
+    args.extend(flags.iter().map(OsStr::new));
+    args.push(input.as_os_str());
+    cli(&args)
+}
+
+/// Runs `danonpdf-cli extract <flags> --pages <pages> --output <output>
+/// <input>`.
+fn extract(flags: &[&str], pages: &str, output: &Path, input: &Path) -> Output {
+    let mut args: Vec<&OsStr> = vec![OsStr::new("extract")];
+    args.extend(flags.iter().map(OsStr::new));
+    args.push(OsStr::new("--pages"));
+    args.push(OsStr::new(pages));
+    args.push(OsStr::new("--output"));
+    args.push(output.as_os_str());
+    args.push(input.as_os_str());
+    cli(&args)
+}
+
+/// Runs `danonpdf-cli split <flags> --output-dir <folder> <input>`. To
+/// split every N pages, put `"--every", "N"` among the flags.
+fn split(flags: &[&str], folder: &Path, input: &Path) -> Output {
+    let mut args: Vec<&OsStr> = vec![OsStr::new("split")];
+    args.extend(flags.iter().map(OsStr::new));
+    args.push(OsStr::new("--output-dir"));
+    args.push(folder.as_os_str());
+    args.push(input.as_os_str());
+    cli(&args)
+}
+
 /// What the program wrote to stdout, as text.
 fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).expect("stdout should be UTF-8")
@@ -115,16 +147,18 @@ impl Drop for ScratchDir {
     }
 }
 
-/// A document with `page_count` empty A4 pages.
+/// A document with `page_count` empty pages. Page `n` is `500 + n` points
+/// wide, so a test can tell which pages ended up where (see
+/// [`page_widths`]).
 fn with_pages(page_count: i64) -> Document {
     let mut document = Document::with_version("1.5");
     let pages_id = document.new_object_id();
-    let kids: Vec<Object> = (0..page_count)
-        .map(|_| {
+    let kids: Vec<Object> = (1..=page_count)
+        .map(|number| {
             let page_id = document.add_object(dictionary! {
                 "Type" => "Page",
                 "Parent" => pages_id,
-                "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+                "MediaBox" => vec![0.into(), 0.into(), (500 + number).into(), 842.into()],
             });
             Object::Reference(page_id)
         })
@@ -156,6 +190,31 @@ fn encrypted(mut document: Document, user_password: &str) -> Document {
 /// How many pages the PDF at `path` has.
 fn page_count(path: &Path) -> usize {
     Document::load(path).unwrap().get_pages().len()
+}
+
+/// The width of every page of the PDF at `path`, in page order. For a
+/// file made from [`with_pages`], `[503, 501]` means: page 3 of the input,
+/// then page 1.
+fn page_widths(path: &Path) -> Vec<i64> {
+    let document = Document::load(path).unwrap();
+    document
+        .page_iter()
+        .map(|page_id| {
+            let page = document.get_dictionary(page_id).unwrap();
+            let media_box = page.get(b"MediaBox").unwrap().as_array().unwrap();
+            media_box[2].as_i64().unwrap()
+        })
+        .collect()
+}
+
+/// The names of everything in `folder`, sorted.
+fn entries_of(folder: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
 }
 
 // Success
@@ -268,12 +327,17 @@ fn inputs_and_output_are_used_exactly_as_given() {
 
 // Refusals: nothing is written
 
-/// Checks a failure report and returns its `error` object.
+/// Checks the failure report of a merge and returns its `error` object.
 fn error_of(result: &Output, code: &str) -> Value {
+    failure_of(result, "merge", code)
+}
+
+/// Checks the failure report of `operation` and returns its `error` object.
+fn failure_of(result: &Output, operation: &str, code: &str) -> Value {
     assert_eq!(result.status.code(), Some(1));
     let report = json_report(result);
     assert_eq!(report["ok"], false);
-    assert_eq!(report["operation"], "merge");
+    assert_eq!(report["operation"], operation);
     assert_eq!(report["error"]["code"], code);
     let message = report["error"]["message"].as_str().unwrap_or_default();
     assert!(!message.is_empty(), "the error needs a message");
@@ -455,8 +519,18 @@ fn version_prints_the_name_and_the_version() {
 
 #[test]
 fn help_teaches_the_whole_contract() {
-    // Three ways to ask; an agent that has never seen the tool may try any.
-    let asks: [&[&str]; 3] = [&["--help"], &["help", "merge"], &["merge", "--help"]];
+    // Every way to ask; an agent that has never seen the tool may try any.
+    let asks: [&[&str]; 9] = [
+        &["--help"],
+        &["help", "merge"],
+        &["merge", "--help"],
+        &["help", "info"],
+        &["info", "--help"],
+        &["help", "extract"],
+        &["extract", "--help"],
+        &["help", "split"],
+        &["split", "--help"],
+    ];
     for ask in asks {
         let args: Vec<&OsStr> = ask.iter().map(OsStr::new).collect();
         let result = cli(&args);
@@ -465,16 +539,32 @@ fn help_teaches_the_whole_contract() {
         assert_eq!(stderr(&result), "", "{ask:?}");
         let help = stdout(&result);
         for expected in [
-            // An example to copy.
+            // An example to copy, for every command.
             "danonpdf-cli merge --json --output merged.pdf first.pdf second.pdf",
+            "danonpdf-cli info --json report.pdf",
+            "danonpdf-cli extract --json --pages 1-3,7,10- --output part.pdf report.pdf",
+            "danonpdf-cli split --json --every 10 --output-dir parts report.pdf",
+            // The page syntax, and which mistakes end with which exit code.
+            "A-B  pages A to B, both included; A must not be above B",
+            "A-   page A and every page after it",
+            "a backwards range such as 5-3, a page listed twice) is a usage error",
+            "exit code 1, error code page_out_of_range",
+            // How split names its files, and that it writes all or nothing.
+            "<name of the input without its extension>-<NNN>.pdf",
+            "--force was not given, nothing is written at all",
             // The exit codes, and what happens to a report nobody can read.
             "Exit codes:",
             "If the report cannot be written",
             // The one code this command line can never produce says so.
-            "no_inputs        there was nothing to merge; never reported by this",
-            // Both JSON shapes.
+            "no_inputs          there was nothing to merge; never reported by this",
+            // Every JSON shape.
             r#"{"ok":true,"operation":"merge","output":"merged.pdf","inputs":2,"pages":12}"#,
+            r#"{"ok":true,"operation":"info","input":"report.pdf","pages":12}"#,
+            r#"{"ok":true,"operation":"extract","output":"part.pdf","pages":7}"#,
+            r#"{"ok":true,"operation":"split","outputs":["parts/report-001.pdf","parts/report-002.pdf"],"files":2,"pages":12}"#,
             r#"{"ok":false,"operation":"merge","error":{"code":"output_exists","#,
+            // The extra key of a split that stopped midway.
+            r#"adds "written" to"#,
             // Every error code.
             "output_is_input",
             "output_exists",
@@ -482,9 +572,483 @@ fn help_teaches_the_whole_contract() {
             "read_failed",
             "encrypted",
             "broken_pdf",
+            "page_out_of_range",
             "save_failed",
         ] {
             assert!(help.contains(expected), "{ask:?} lacks {expected:?}");
         }
     }
+}
+
+#[test]
+fn the_examples_in_the_help_tell_the_truth() {
+    // The help shows what `extract --pages 1-3,7,10-` and `split --every
+    // 10` print for a 12-page report. Run both on one and compare the
+    // numbers, so the examples cannot drift from what the tool does.
+    let scratch = ScratchDir::new("help-examples");
+    let report = scratch.pdf("report.pdf", 12);
+
+    let extracted = extract(&["--json"], "1-3,7,10-", &scratch.file("part.pdf"), &report);
+    let parts = split(
+        &["--json", "--every", "10"],
+        &scratch.file("parts"),
+        &report,
+    );
+
+    assert_eq!(json_report(&info(&["--json"], &report))["pages"], 12);
+    assert_eq!(json_report(&extracted)["pages"], 7);
+    let parts = json_report(&parts);
+    assert_eq!(parts["files"], 2);
+    assert_eq!(parts["pages"], 12);
+    assert_eq!(
+        entries_of(&scratch.file("parts")),
+        ["report-001.pdf", "report-002.pdf"]
+    );
+}
+
+// info
+
+#[test]
+fn info_prints_one_human_line() {
+    let scratch = ScratchDir::new("info-human");
+    let input = scratch.pdf("a.pdf", 3);
+
+    let result = info(&[], &input);
+
+    assert_eq!(result.status.code(), Some(0));
+    assert_eq!(
+        stdout(&result),
+        format!("{} has 3 pages\n", input.display())
+    );
+    assert_eq!(stderr(&result), "");
+}
+
+#[test]
+fn info_with_json_prints_exactly_one_object() {
+    let scratch = ScratchDir::new("info-json");
+    let input = scratch.pdf("a.pdf", 12);
+
+    let result = info(&["--json"], &input);
+
+    assert_eq!(result.status.code(), Some(0));
+    assert_eq!(
+        json_report(&result),
+        json!({
+            "ok": true,
+            "operation": "info",
+            "input": text(&input),
+            "pages": 12,
+        })
+    );
+    // The order of the keys is part of the contract too, and a parsed
+    // value has lost it: `ok` and `operation` come first.
+    assert!(
+        stdout(&result).starts_with(r#"{"ok":true,"operation":"info","input":""#),
+        "unexpected: {}",
+        stdout(&result)
+    );
+    // Nothing was written next to the input.
+    assert_eq!(scratch.entries(), ["a.pdf"]);
+}
+
+#[test]
+fn info_reports_what_it_cannot_read_with_its_path() {
+    let scratch = ScratchDir::new("info-failures");
+    let missing = scratch.file("missing.pdf");
+    let locked = scratch.file("locked.pdf");
+    encrypted(with_pages(1), "secret").save(&locked).unwrap();
+
+    let error = failure_of(&info(&["--json"], &missing), "info", "read_failed");
+    assert_eq!(error["path"], text(&missing));
+    let error = failure_of(&info(&["--json"], &locked), "info", "encrypted");
+    assert_eq!(error["path"], text(&locked));
+}
+
+// extract
+
+#[test]
+fn extract_writes_the_chosen_pages_in_the_order_given() {
+    let scratch = ScratchDir::new("extract-success");
+    let input = scratch.pdf("in.pdf", 5);
+    let out = scratch.file("out.pdf");
+
+    let result = extract(&["--json"], "3,1", &out, &input);
+
+    assert_eq!(result.status.code(), Some(0));
+    assert_eq!(
+        json_report(&result),
+        json!({
+            "ok": true,
+            "operation": "extract",
+            "output": text(&out),
+            "pages": 2,
+        })
+    );
+    assert!(
+        stdout(&result).starts_with(r#"{"ok":true,"operation":"extract","output":""#),
+        "unexpected: {}",
+        stdout(&result)
+    );
+    // Page 3 of the input, then page 1.
+    assert_eq!(page_widths(&out), [503, 501]);
+    // What `info` says about the result agrees with the report.
+    assert_eq!(json_report(&info(&["--json"], &out))["pages"], 2);
+    // The input is only read.
+    assert_eq!(page_count(&input), 5);
+}
+
+#[test]
+fn extract_understands_ranges_and_spaces() {
+    let scratch = ScratchDir::new("extract-ranges");
+    let input = scratch.pdf("in.pdf", 6);
+    let out = scratch.file("out.pdf");
+
+    let result = extract(&[], " 5- , 1-2 ", &out, &input);
+
+    assert_eq!(result.status.code(), Some(0), "{}", stderr(&result));
+    assert_eq!(
+        stdout(&result),
+        format!("Extracted 4 pages into {}\n", out.display())
+    );
+    assert_eq!(stderr(&result), "");
+    assert_eq!(page_widths(&out), [505, 506, 501, 502]);
+}
+
+#[test]
+fn extract_never_writes_over_its_input() {
+    let scratch = ScratchDir::new("extract-output-is-input");
+    let input = scratch.pdf("in.pdf", 3);
+    let before = fs::read(&input).unwrap();
+    // The input itself, spelled differently.
+    let respelled = scratch.0.join(".").join("in.pdf");
+
+    for flags in [&["--json"][..], &["--json", "--force"][..]] {
+        let result = extract(flags, "1", &respelled, &input);
+
+        let error = failure_of(&result, "extract", "output_is_input");
+        assert_eq!(error["path"], text(&respelled));
+        assert_eq!(fs::read(&input).unwrap(), before, "the input was changed");
+        assert_eq!(scratch.entries(), ["in.pdf"]);
+    }
+}
+
+#[test]
+fn extract_replaces_an_existing_output_only_with_force() {
+    let scratch = ScratchDir::new("extract-output-exists");
+    let input = scratch.pdf("in.pdf", 3);
+    let out = scratch.file("out.pdf");
+    fs::write(&out, b"someone else's file").unwrap();
+
+    let refused = extract(&["--json"], "2", &out, &input);
+
+    let error = failure_of(&refused, "extract", "output_exists");
+    assert_eq!(error["path"], text(&out));
+    assert_eq!(fs::read(&out).unwrap(), b"someone else's file");
+
+    let forced = extract(&["--json", "--force"], "2", &out, &input);
+
+    assert_eq!(forced.status.code(), Some(0));
+    assert_eq!(page_widths(&out), [502]);
+}
+
+#[test]
+fn a_page_past_the_end_is_page_out_of_range_and_writes_nothing() {
+    let scratch = ScratchDir::new("extract-past-end");
+    let input = scratch.pdf("in.pdf", 5);
+    let out = scratch.file("out.pdf");
+
+    let result = extract(&["--json"], "2,9", &out, &input);
+
+    let error = failure_of(&result, "extract", "page_out_of_range");
+    // The failure is about the pages asked for, not about a file.
+    assert_eq!(error.get("path"), None);
+    assert_eq!(
+        error["message"],
+        "page 9 is past the end of the document, which has 5 pages"
+    );
+    assert_eq!(scratch.entries(), ["in.pdf"]);
+}
+
+#[test]
+fn pages_that_cannot_be_read_are_a_usage_error_also_with_json() {
+    let scratch = ScratchDir::new("extract-bad-pages");
+    let input = scratch.pdf("in.pdf", 5);
+    let out = scratch.file("out.pdf");
+
+    // One text for each rule of the syntax.
+    for pages in ["", "1,,3", "abc", "0", "5-3", "1-5,3"] {
+        for flags in [&[][..], &["--json"][..]] {
+            let result = extract(flags, pages, &out, &input);
+
+            assert_eq!(result.status.code(), Some(2), "{pages:?} {flags:?}");
+            assert_eq!(stdout(&result), "", "{pages:?} {flags:?}");
+            let message = stderr(&result);
+            assert!(
+                message.starts_with("error: ") && message.contains("--pages <PAGES>"),
+                "{pages:?} {flags:?} gave: {message}"
+            );
+        }
+    }
+    assert_eq!(scratch.entries(), ["in.pdf"]);
+}
+
+#[test]
+fn extract_reports_an_encrypted_input_with_its_path() {
+    let scratch = ScratchDir::new("extract-encrypted");
+    let locked = scratch.file("locked.pdf");
+    encrypted(with_pages(2), "secret").save(&locked).unwrap();
+    let out = scratch.file("out.pdf");
+
+    let result = extract(&["--json"], "1", &out, &locked);
+
+    let error = failure_of(&result, "extract", "encrypted");
+    assert_eq!(error["path"], text(&locked));
+    assert!(!out.exists(), "nothing should be written");
+}
+
+// split
+
+#[test]
+fn split_writes_one_file_per_page_by_default() {
+    let scratch = ScratchDir::new("split-default");
+    let input = scratch.pdf("doc.pdf", 3);
+    let folder = scratch.file("parts");
+    let names = ["doc-001.pdf", "doc-002.pdf", "doc-003.pdf"];
+    let outputs = names.map(|name| folder.join(name));
+
+    let result = split(&["--json"], &folder, &input);
+
+    assert_eq!(result.status.code(), Some(0));
+    assert_eq!(
+        json_report(&result),
+        json!({
+            "ok": true,
+            "operation": "split",
+            "outputs": outputs.each_ref().map(|output| text(output)),
+            "files": 3,
+            "pages": 3,
+        })
+    );
+    // The order of the keys, which a parsed value has lost.
+    let line = stdout(&result);
+    let keys = [
+        r#""ok":"#,
+        r#""operation":"#,
+        r#""outputs":"#,
+        r#""files":"#,
+        r#""pages":"#,
+    ];
+    let places: Vec<usize> = keys.iter().map(|key| line.find(key).unwrap()).collect();
+    assert!(places.is_sorted(), "unexpected order: {line}");
+
+    assert_eq!(entries_of(&folder), names);
+    let widths: Vec<Vec<i64>> = outputs.iter().map(|output| page_widths(output)).collect();
+    assert_eq!(widths, [[501], [502], [503]]);
+    // The input is only read.
+    assert_eq!(page_count(&input), 3);
+}
+
+#[test]
+fn split_every_n_pages_leaves_a_shorter_last_file() {
+    let scratch = ScratchDir::new("split-every");
+    let input = scratch.pdf("doc.pdf", 5);
+    let folder = scratch.file("parts");
+
+    let result = split(&["--every", "2"], &folder, &input);
+
+    assert_eq!(result.status.code(), Some(0), "{}", stderr(&result));
+    assert_eq!(
+        stdout(&result),
+        format!(
+            "Split 5 pages into 3 files: {} to {}\n",
+            folder.join("doc-001.pdf").display(),
+            folder.join("doc-003.pdf").display()
+        )
+    );
+    assert_eq!(stderr(&result), "");
+    assert_eq!(page_widths(&folder.join("doc-001.pdf")), [501, 502]);
+    assert_eq!(page_widths(&folder.join("doc-002.pdf")), [503, 504]);
+    assert_eq!(page_widths(&folder.join("doc-003.pdf")), [505]);
+}
+
+#[test]
+fn split_creates_the_output_folder_and_what_is_missing_above_it() {
+    let scratch = ScratchDir::new("split-new-folder");
+    let input = scratch.pdf("doc.pdf", 2);
+    let folder = scratch.file("new").join("deeper");
+
+    let result = split(&["--json"], &folder, &input);
+
+    assert_eq!(result.status.code(), Some(0));
+    assert_eq!(entries_of(&folder), ["doc-001.pdf", "doc-002.pdf"]);
+}
+
+#[test]
+fn split_writes_nothing_when_one_of_its_names_is_taken() {
+    let scratch = ScratchDir::new("split-name-taken");
+    let input = scratch.pdf("doc.pdf", 3);
+    let folder = scratch.file("parts");
+    fs::create_dir(&folder).unwrap();
+    // The second and the third name are in use; the first one is free.
+    fs::write(folder.join("doc-002.pdf"), b"someone else's file").unwrap();
+    fs::write(folder.join("doc-003.pdf"), b"another one").unwrap();
+
+    let result = split(&["--json"], &folder, &input);
+
+    // The first name that is taken is the one reported.
+    let error = failure_of(&result, "split", "output_exists");
+    assert_eq!(error["path"], text(&folder.join("doc-002.pdf")));
+    assert_eq!(error.get("written"), None);
+    // Not even the file whose name was free: all or nothing.
+    assert_eq!(entries_of(&folder), ["doc-002.pdf", "doc-003.pdf"]);
+    assert_eq!(
+        fs::read(folder.join("doc-002.pdf")).unwrap(),
+        b"someone else's file"
+    );
+}
+
+#[test]
+fn split_with_force_replaces_the_files_that_are_there() {
+    let scratch = ScratchDir::new("split-force");
+    let input = scratch.pdf("doc.pdf", 2);
+    let folder = scratch.file("parts");
+    fs::create_dir(&folder).unwrap();
+    fs::write(folder.join("doc-002.pdf"), b"an old file").unwrap();
+
+    let result = split(&["--json", "--force"], &folder, &input);
+
+    assert_eq!(result.status.code(), Some(0));
+    assert_eq!(json_report(&result)["files"], 2);
+    assert_eq!(page_widths(&folder.join("doc-002.pdf")), [502]);
+}
+
+#[test]
+fn a_split_that_fails_before_planning_does_not_create_the_folder() {
+    let scratch = ScratchDir::new("split-missing-input");
+    let missing = scratch.file("missing.pdf");
+    let folder = scratch.file("parts");
+
+    let result = split(&["--json"], &folder, &missing);
+
+    let error = failure_of(&result, "split", "read_failed");
+    assert_eq!(error["path"], text(&missing));
+    assert_eq!(scratch.entries(), Vec::<String>::new());
+}
+
+// Links only exist in this form on Unix-like systems; creating one on
+// Windows needs a different function and, often, special rights.
+#[cfg(unix)]
+#[test]
+fn split_never_writes_over_its_input() {
+    // The names of a split never spell the input, so the only way for one
+    // of them to be the input is a link. With `--force` and without this
+    // rule, the tool would be asked to replace what it is reading.
+    let scratch = ScratchDir::new("split-output-is-input");
+    let input = scratch.pdf("doc.pdf", 2);
+    let before = fs::read(&input).unwrap();
+    let folder = scratch.file("parts");
+    fs::create_dir(&folder).unwrap();
+    let link = folder.join("doc-002.pdf");
+    std::os::unix::fs::symlink(&input, &link).unwrap();
+
+    for flags in [&["--json"][..], &["--json", "--force"][..]] {
+        let result = split(flags, &folder, &input);
+
+        let error = failure_of(&result, "split", "output_is_input");
+        assert_eq!(error["path"], text(&link));
+        assert_eq!(fs::read(&input).unwrap(), before, "the input was changed");
+        assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(entries_of(&folder), ["doc-002.pdf"]);
+    }
+}
+
+#[test]
+fn a_split_that_stops_midway_lists_the_files_it_wrote_and_keeps_them() {
+    let scratch = ScratchDir::new("split-midway");
+    let input = scratch.pdf("doc.pdf", 3);
+    let folder = scratch.file("parts");
+    // A folder holds the name of the second file. `--force` lets the split
+    // start anyway, but a file cannot take the place of a folder, so the
+    // second save fails after the first one worked.
+    fs::create_dir_all(folder.join("doc-002.pdf")).unwrap();
+
+    let result = split(&["--json", "--force"], &folder, &input);
+
+    let error = failure_of(&result, "split", "save_failed");
+    assert_eq!(error["path"], text(&folder.join("doc-002.pdf")));
+    assert_eq!(error["written"], json!([text(&folder.join("doc-001.pdf"))]));
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("the split stopped after 1 of 3 files: cannot save "),
+        "unexpected message: {message}"
+    );
+    // The first file is complete and still there; the third was not tried.
+    assert_eq!(page_widths(&folder.join("doc-001.pdf")), [501]);
+    assert_eq!(entries_of(&folder), ["doc-001.pdf", "doc-002.pdf"]);
+}
+
+#[test]
+fn without_json_a_split_that_stops_midway_says_so_on_stderr() {
+    let scratch = ScratchDir::new("split-midway-human");
+    let input = scratch.pdf("doc.pdf", 2);
+    let folder = scratch.file("parts");
+    fs::create_dir_all(folder.join("doc-002.pdf")).unwrap();
+
+    let result = split(&["--force"], &folder, &input);
+
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(stdout(&result), "");
+    let message = stderr(&result);
+    assert!(
+        message.starts_with("error: the split stopped after 1 of 2 files: cannot save "),
+        "unexpected: {message}"
+    );
+    assert_eq!(message.matches('\n').count(), 1, "one line: {message}");
+}
+
+#[test]
+fn every_must_be_1_or_more_also_with_json() {
+    let scratch = ScratchDir::new("split-every-usage");
+    let input = scratch.pdf("doc.pdf", 2);
+    let folder = scratch.file("parts");
+
+    for every in ["0", "abc", "1.5"] {
+        let result = split(&["--json", "--every", every], &folder, &input);
+
+        assert_eq!(result.status.code(), Some(2), "{every:?}");
+        assert_eq!(stdout(&result), "", "{every:?}");
+        assert!(
+            stderr(&result).contains("--every <N>"),
+            "{every:?} gave: {}",
+            stderr(&result)
+        );
+    }
+    assert_eq!(scratch.entries(), ["doc.pdf"]);
+}
+
+#[test]
+fn the_new_commands_refuse_an_incomplete_command_line() {
+    let scratch = ScratchDir::new("new-usage");
+    let input = scratch.pdf("doc.pdf", 2);
+    let out = scratch.file("out.pdf");
+
+    let info_without_input = cli(&[OsStr::new("info"), OsStr::new("--json")]);
+    let extract_without_pages = cli(&[
+        OsStr::new("extract"),
+        OsStr::new("--output"),
+        out.as_os_str(),
+        input.as_os_str(),
+    ]);
+    let split_without_folder = cli(&[OsStr::new("split"), input.as_os_str()]);
+
+    for result in [
+        info_without_input,
+        extract_without_pages,
+        split_without_folder,
+    ] {
+        assert_eq!(result.status.code(), Some(2));
+        assert_eq!(stdout(&result), "");
+        assert!(!stderr(&result).is_empty(), "stderr should explain");
+    }
+    assert_eq!(scratch.entries(), ["doc.pdf"]);
 }

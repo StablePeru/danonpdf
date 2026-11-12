@@ -2,7 +2,7 @@
 
 DanonPDF will be a free, fast desktop tool for everyday PDF work: merge, split, rotate, reorder and delete pages with thumbnails, compress, and turn images into PDF. Windows first, Linux later. It is part of DanonAA.
 
-> **Status:** early work. The app can merge PDF files, from the window or from the command line. The other tools do not exist yet.
+> **Status:** early work. The app can merge PDF files, from the window or from the command line. The command line can also count the pages of a file, extract pages and split a file; the window cannot yet. The other tools do not exist.
 
 ## Merging PDFs
 
@@ -10,36 +10,61 @@ DanonPDF will be a free, fast desktop tool for everyday PDF work: merge, split, 
 2. Put them in order with **Up** and **Down**, and take out any with **Remove** (the file itself is not touched). **Clear** empties the list.
 3. Click **Merge…** and choose where to save. It proposes `merged.pdf` next to the first file, or `merged (2).pdf` and so on when that name is already in the list. It refuses to write over one of the files being merged (a hard link to one of them is not recognised). If you type a name without `.pdf`, it adds `.pdf`, and it does not merge when a file with that name already exists: choose that file in the dialog to replace it. The line at the bottom then says how many pages were written, or why the merge failed.
 
-The merge runs while the window waits, so with very big files the window may stop answering for a few seconds. Bookmarks, named destinations, form fields and the tagged structure of the inputs are not carried over yet.
+The merge runs while the window waits, so with very big files the window may stop answering for a few seconds. What a merged file does not keep is listed under [Limits](#limits).
 
 ## Command line
 
-`danonpdf-cli` does the same merge without a window, so a script or an AI agent can use it. It never asks a question, never waits for input and never uses the network.
+`danonpdf-cli` does the work without a window, so a script or an AI agent can use it. It never asks a question, never waits for input and never uses the network.
 
 ```sh
 danonpdf-cli merge --output merged.pdf first.pdf second.pdf
-danonpdf-cli merge --json --output merged.pdf first.pdf second.pdf
+danonpdf-cli info report.pdf
+danonpdf-cli extract --pages 1-3,7,10- --output part.pdf report.pdf
+danonpdf-cli split --every 10 --output-dir parts report.pdf
 ```
 
-The first form prints one line, such as `Merged 2 files (12 pages) into merged.pdf`, or `error: …` on stderr when it fails. With `--json` it prints exactly one JSON object on stdout, for a success and for a failure alike, and nothing on stderr:
+| Command | What it does | What it prints |
+| --- | --- | --- |
+| `merge` | Joins the files, in the order given, into one new file. | `Merged 2 files (12 pages) into merged.pdf` |
+| `info` | Counts the pages of a file. | `report.pdf has 12 pages` |
+| `extract` | Copies the chosen pages, in the order given, into one new file. | `Extracted 7 pages into part.pdf` |
+| `split` | Writes the pages into files of `--every` pages each (one page each without it). | `Split 12 pages into 2 files: parts/report-001.pdf to parts/report-002.pdf` |
+
+When a command fails, it prints `error: …` on stderr instead. With `--json`, every command prints exactly one JSON object on stdout, for a success and for a failure alike, and nothing on stderr:
 
 ```text
 {"ok":true,"operation":"merge","output":"merged.pdf","inputs":2,"pages":12}
+{"ok":true,"operation":"info","input":"report.pdf","pages":12}
+{"ok":true,"operation":"extract","output":"part.pdf","pages":7}
+{"ok":true,"operation":"split","outputs":["parts/report-001.pdf","parts/report-002.pdf"],"files":2,"pages":12}
 {"ok":false,"operation":"merge","error":{"code":"output_exists","message":"…","path":"merged.pdf"}}
 ```
 
 | Exit code | Meaning |
 | --- | --- |
-| `0` | The files were merged. |
-| `1` | The merge was refused or failed. |
+| `0` | The operation succeeded. |
+| `1` | The operation was refused or failed. |
 | `2` | The command line was wrong. The message is plain text on stderr, also with `--json`. |
 
-What it does and does not do:
+### Choosing pages
 
-- It reads every input, in the order given. No file is skipped for its name, and the same file given twice is merged twice.
-- It uses the output path exactly as given: it does not add `.pdf`.
-- It never writes over one of the inputs, not even with `--force` (a hard link to one of them is not recognised).
+`--pages` takes a list of items separated by commas. Pages are counted from 1, and they are written in the order given.
+
+| Item | Meaning |
+| --- | --- |
+| `7` | Page 7. |
+| `1-3` | Pages 1 to 3. |
+| `10-` | Page 10 and every page after it. |
+
+So `1-3,7,10-` on a 12-page file takes pages 1, 2, 3, 7, 10, 11 and 12, and `3,1` puts page 3 before page 1. A list that cannot be read (`5-3`, `1,,3`, page 0, the same page twice) is a wrong command line: exit code `2`. A page past the end of the file is the failure `page_out_of_range`: exit code `1`. `info` tells how many pages there are.
+
+### What it does and does not do
+
+- It reads every input as given. No file is skipped for its name, and `merge` reads the same file twice when it is given twice.
+- It uses output paths exactly as given: it does not add `.pdf`.
+- It never writes over an input, not even with `--force` (a hard link to one is not recognised).
 - It replaces an existing output only with `--force`.
+- `split` names its files after the input, numbered from 1: `report.pdf` gives `report-001.pdf`, `report-002.pdf`… inside `--output-dir`, which it creates if it is missing. It checks every name before it writes anything: if one is taken and `--force` was not given, it writes nothing. If a file cannot be saved halfway through, it stops and keeps the files already written; with `--json`, the error lists them under `written`.
 
 `danonpdf-cli --help` shows all of this with the list of error codes. [AGENTS.md](AGENTS.md) is the same contract written for an agent.
 
@@ -48,6 +73,14 @@ To try it from the build container, put the PDFs somewhere inside the checkout (
 ```sh
 docker compose run --rm build cargo run --release -p danonpdf-cli -- merge --output merged.pdf first.pdf second.pdf
 ```
+
+## Limits
+
+- **Only pages travel.** A merged, extracted or split file holds the pages and what they use. Bookmarks, named destinations, form fields, the tagged structure and the document information (title, author) of the inputs are not carried over yet.
+- **Links to pages left out stop working.** When pages are extracted or split, a link to a page that is not in the new file stays on its page and leads nowhere. That page is not carried along in secret.
+- **A split file can be bigger than its share.** Each new file holds everything its pages point at, used or not. Some programs give every page the same list of all the fonts and images of the document; each file split from such a PDF carries all of them.
+- **Splitting into many files takes seconds, not milliseconds.** Each file is made safe on the disk before the next one starts, so that a power cut cannot leave a broken file under a finished name. That wait is paid once per file: 300 one-page files took about 5 seconds in the build container, nearly all of it waiting for the disk.
+- **Password-protected files are refused.** A file that opens without a password is read like any other.
 
 ## Why local
 
@@ -99,6 +132,7 @@ It prints how many pages it wrote, or why it could not merge.
 | --- | --- |
 | `crates/danonpdf-core` | The PDF logic, with no user interface. |
 | `crates/danonpdf-core/examples/merge.rs` | The command-line merge example above. |
+| `crates/danonpdf-core/src/pages.rs` | The page syntax (`1-3,7,10-`), shared by every front end. |
 | `crates/danonpdf-cli` | The command-line tool (`danonpdf-cli`): arguments in, a line or a JSON object out. |
 | `crates/danonpdf-cli/tests/cli.rs` | Runs the real program and checks its output and exit codes. |
 | `crates/danonpdf-desktop` | The desktop app (`danonpdf`), built with [egui](https://github.com/emilk/egui). |
