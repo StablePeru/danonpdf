@@ -112,6 +112,53 @@ pub(crate) fn with_inherited_attributes() -> Document {
     document
 }
 
+/// A one-page document whose page is `width` by `height` points and holds
+/// what `operations` draw. No fonts: for pages that draw shapes or nothing.
+fn with_one_page(width: i64, height: i64, operations: Vec<Operation>) -> Document {
+    let mut document = Document::with_version("1.5");
+    let pages_id = document.new_object_id();
+    let content = Content { operations };
+    let content_id = document.add_object(Stream::new(Dictionary::new(), content.encode().unwrap()));
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "Contents" => content_id,
+        "MediaBox" => vec![0.into(), 0.into(), width.into(), height.into()],
+    });
+    let pages = dictionary! {
+        "Type" => "Pages",
+        "Kids" => vec![Object::Reference(page_id)],
+        "Count" => 1,
+    };
+    document.objects.insert(pages_id, Object::Dictionary(pages));
+    let catalog_id = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    document.trailer.set("Root", catalog_id);
+    document
+}
+
+/// A one-page document whose page is `width` by `height` points, with
+/// nothing drawn on it.
+pub(crate) fn with_blank_page(width: i64, height: i64) -> Document {
+    with_one_page(width, height, Vec::new())
+}
+
+/// A one-page A4 document: the bottom half of the page is pure red and the
+/// top half is left empty.
+///
+/// A drawn page tells two things that black text on white cannot: which
+/// way up the image is (PDF counts `y` from the bottom of the page, an
+/// image counts rows from the top) and which of its colour channels is red.
+pub(crate) fn with_red_bottom_half() -> Document {
+    let fill_bottom_half = vec![
+        // "rg" sets the fill colour as red, green, blue, each from 0 to 1.
+        Operation::new("rg", vec![1.into(), 0.into(), 0.into()]),
+        // "re" adds a rectangle: x, y, width, height, from the bottom left.
+        Operation::new("re", vec![0.into(), 0.into(), 595.into(), 421.into()]),
+        Operation::new("f", vec![]),
+    ];
+    with_one_page(595, 842, fill_bottom_half)
+}
+
 /// The marker text of every page, in page order.
 pub(crate) fn markers(document: &Document) -> Vec<String> {
     document

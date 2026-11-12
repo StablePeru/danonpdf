@@ -6,6 +6,7 @@ mod errors;
 mod merge;
 mod pages;
 mod paths;
+mod render;
 mod save;
 mod split;
 #[cfg(test)]
@@ -17,6 +18,10 @@ pub use errors::{PdfError, WhichInput, error_chain};
 pub use merge::{merge_documents, merge_files};
 pub use pages::{PageSelection, PageSyntaxError};
 pub use paths::{name_is_taken, same_file};
+pub use render::{
+    MAX_RENDER_HEIGHT, MAX_RENDER_WIDTH, PDFIUM_DIR_VARIABLE, PageImage, RenderError, Renderer,
+    default_library_folder, write_png,
+};
 pub use split::{SplitError, SplitPlan, extract_file, page_count, plan_split, split_output_paths};
 
 use std::path::Path;

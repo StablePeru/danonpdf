@@ -41,6 +41,23 @@ eframe = { version = "0.37", default-features = false }
 # default, chrono-clock, only converts PDF dates to and from chrono types,
 # which DanonPDF does not use, so it would be one more crate for nothing.
 lopdf = { version = "0.47", default-features = false, features = ["rayon"] }
+# Binds to PDFium, the C++ library that draws PDF pages, through its C
+# interface (MIT OR Apache-2.0). PDFium is not compiled or linked here: the
+# crate loads pdfium.dll or libpdfium.so when the program runs (see "PDFium"
+# in the README). Only danonpdf-core uses it, and only in its `render`
+# module.
+# - Its defaults are off: they pull in the `image` crate, to hand pages over
+#   as `image` types. The core hands over plain RGBA bytes instead.
+# - `pdfium_8125` picks the PDFium build whose functions the crate expects
+#   to find. It must be the build the Dockerfile downloads (PDFIUM_BUILD).
+# - `thread_safe` puts every call into PDFium behind one lock, which makes
+#   the crate's types `Send + Sync`: PDFium itself must never be entered by
+#   two threads at once.
+pdfium-render = { version = "0.9.5", default-features = false, features = ["pdfium_8125", "thread_safe"] }
+# Writes PNG files, and reads them back in tests (MIT OR Apache-2.0). The
+# desktop app already had it in its build (eframe uses it through the
+# `image` crate), so only the command-line tool gains a crate.
+png = "0.18"
 # Native file and message dialogs (MIT). Its defaults are Linux-only (the
 # xdg-desktop-portal backend and Wayland window parenting); the desktop crate
 # turns on what each platform needs.

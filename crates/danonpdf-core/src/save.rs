@@ -1,6 +1,9 @@
-//! Writing a document to disk without ever leaving a half-written file
-//! behind a failed save, and with a stated answer ([`Durability`]) to "what
-//! if the power goes right after it?".
+//! Writing a file to disk without ever leaving a half-written one behind a
+//! failed save, and with a stated answer ([`Durability`]) to "what if the
+//! power goes right after it?".
+//!
+//! [`save`] writes a PDF document. [`write_atomically`] is the same recipe
+//! for any other content, such as the image of a page.
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
@@ -63,7 +66,7 @@ pub(crate) enum Durability {
     Unsynced,
 }
 
-/// Saves `document` at `path` in one step (see [`save_atomically`]), and
+/// Saves `document` at `path` in one step (see [`write_atomically`]), and
 /// names `path` in the error if it cannot. `durability` says whether to
 /// wait for the disk first: see [`Durability`].
 ///
@@ -74,27 +77,43 @@ pub(crate) fn save(
     path: &Path,
     durability: Durability,
 ) -> Result<(), PdfError> {
-    save_atomically(document, path, durability).map_err(|source| PdfError::Save {
-        path: path.to_path_buf(),
-        source,
+    write_atomically(path, durability, |writer| document.save_to(writer)).map_err(|source| {
+        PdfError::Save {
+            path: path.to_path_buf(),
+            source,
+        }
     })
 }
 
-/// Saves `document` at `path` without ever leaving a half-written file there.
+/// Writes a file at `path` without ever leaving a half-written file there.
+/// `write` produces the content: it is handed a writer and writes all of
+/// it.
 ///
 /// Writing straight into `path` would first empty the file and then fill it
 /// again. If that stops halfway (disk full, a crash, the process killed), the
 /// old contents are gone and the new ones are incomplete. Since `path` may be
 /// one of the inputs, that would destroy the user's own file.
 ///
-/// So the document goes to a temporary file in the same folder first. Only
+/// So the content goes to a temporary file in the same folder first. Only
 /// once it is complete (and, with [`Durability::Synced`], on the disk) does
 /// `rename` give it the name `path`, replacing whatever was there. A rename
 /// does not copy any data: it points the name at the other file, in one
 /// step. Anyone opening `path` gets either the old file or the new one,
 /// never a mix. `std::fs::rename` replaces an existing file on Linux, macOS
 /// and Windows alike.
-fn save_atomically(document: &mut Document, path: &Path, durability: Durability) -> io::Result<()> {
+///
+/// It replaces an existing file without asking: whether that is allowed is
+/// a rule of each front end (see `name_is_taken`), decided before it calls
+/// the core.
+///
+/// `write` is a closure: a piece of code passed in as a value. `F: FnOnce`
+/// says that it is called at most once, which lets it use up what it
+/// captured. The function is generic over `F`, so the compiler builds one
+/// copy of it per kind of content, with the call to `write` built in.
+pub(crate) fn write_atomically<F>(path: &Path, durability: Durability, write: F) -> io::Result<()>
+where
+    F: FnOnce(&mut BufWriter<File>) -> io::Result<()>,
+{
     let temporary = temporary_path_for(path)?;
     // `create_new` refuses to open a file that already exists, so we never
     // write over a file that happens to have the same name.
@@ -106,7 +125,7 @@ fn save_atomically(document: &mut Document, path: &Path, durability: Durability)
     // From here on the temporary file exists, so every failure must remove
     // it. Doing the steps in their own function lets `?` stop at the first
     // failure while we still get the chance to clean up here.
-    let result = write_and_replace(document, file, &temporary, path, durability);
+    let result = write_and_replace(write, file, &temporary, path, durability);
     if result.is_err() {
         // Best effort: if the removal fails too, there is nothing better to
         // do, and the save error is the one worth reporting.
@@ -115,19 +134,22 @@ fn save_atomically(document: &mut Document, path: &Path, durability: Durability)
     result
 }
 
-/// Writes `document` into `file` (open at `temporary`), waits for the disk
-/// if `durability` asks for it, and renames the file to `path`.
-fn write_and_replace(
-    document: &mut Document,
+/// Lets `write` fill `file` (open at `temporary`), waits for the disk if
+/// `durability` asks for it, and renames the file to `path`.
+fn write_and_replace<F>(
+    write: F,
     file: File,
     temporary: &Path,
     path: &Path,
     durability: Durability,
-) -> io::Result<()> {
-    // Writing a PDF means many small writes; `BufWriter` gathers them into
-    // a few big ones.
+) -> io::Result<()>
+where
+    F: FnOnce(&mut BufWriter<File>) -> io::Result<()>,
+{
+    // Writing a PDF or an image means many small writes; `BufWriter`
+    // gathers them into a few big ones.
     let mut writer = BufWriter::new(file);
-    document.save_to(&mut writer)?;
+    write(&mut writer)?;
     // `into_inner` writes out what is still in the buffer and hands the file
     // back. Its error also carries the writer; `into_error` keeps only the
     // `io::Error`, so `?` can return it.

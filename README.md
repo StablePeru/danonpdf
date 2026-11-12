@@ -149,19 +149,20 @@ docker compose down --volumes
 
 ## PDFium
 
-To draw a page, DanonPDF uses [PDFium](https://pdfium.googlesource.com/pdfium/), the PDF library of Chromium. It is the only part that is not Rust and not compiled here: it is a prebuilt library that the program loads when it runs, `pdfium.dll` on Windows and `libpdfium.so` on Linux. The build ships it already; the programs do not use it yet.
+To draw a page, DanonPDF uses [PDFium](https://pdfium.googlesource.com/pdfium/), the PDF library of Chromium. It is the only part that is not Rust and not compiled here: it is a prebuilt library that the program loads when it runs, `pdfium.dll` on Windows and `libpdfium.so` on Linux. The core can draw a page with it and write the image as a PNG file; the window and the command-line tool do not use that yet.
 
 - **Where it comes from.** The [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) project, which builds PDFium and publishes one release per build.
 - **Which one.** The release tagged `chromium/8125`: `pdfium-win-x64.tgz` and `pdfium-linux-x64.tgz`.
 - **When it is downloaded.** Only while the build image is made (`docker compose build`), never by the programs. The `Dockerfile` pins the SHA-256 of both archives, and a download that does not match stops the build.
 - **Where it ends up.** In the image, under `/opt/pdfium/`. `scripts/build-windows.sh` copies the DLL to `dist/pdfium.dll`.
+- **Where the programs look for it.** In their own folder, and nowhere else: not in the current folder and not along `PATH`. The environment variable `DANONPDF_PDFIUM_DIR` names another folder; the build image sets it, so the tests find `libpdfium.so`.
 
 **Licences.** PDFium is under the BSD 3-Clause and Apache 2.0 licences, and it has other libraries built into it (FreeType, ICU, libjpeg-turbo, OpenJPEG, zlib and more), each under its own permissive licence. Those licences ask for their text to go with every copy of the binary, so `dist/licenses/pdfium/` holds all of them as they come in the release: `licenses/pdfium.txt` for PDFium, one file for each library in it, and `LICENSE`, the MIT licence of the pdfium-binaries packaging. `VERSION` there says which build the DLL is. DanonPDF itself stays under GPL-3.0. The BSD 3-Clause and Apache 2.0 licences are both compatible with version 3 of the GPL (Apache 2.0 is not compatible with version 2).
 
 ### Bumping PDFium
 
 1. Pick a release of pdfium-binaries whose build number the `pdfium-render` crate supports: it has one `pdfium_NNNN` feature per build it can bind to.
-2. In the `Dockerfile`, set `PDFIUM_BUILD` to that number.
+2. In the `Dockerfile`, set `PDFIUM_BUILD` to that number. In `Cargo.toml`, change the `pdfium_NNNN` feature of `pdfium-render` to the same number.
 3. Download the two archives of that release and compute their hashes with `sha256sum`. Compare each with the `digest` that GitHub shows for the asset on the release page. Only if they agree, write them into `PDFIUM_LINUX_X64_SHA256` and `PDFIUM_WIN_X64_SHA256`.
 4. Rebuild the image with `docker compose build`, then run the tests and `scripts/build-windows.sh` again.
 
@@ -182,6 +183,7 @@ It prints how many pages it wrote, or why it could not merge.
 | `crates/danonpdf-core` | The PDF logic, with no user interface. |
 | `crates/danonpdf-core/examples/merge.rs` | The command-line merge example above. |
 | `crates/danonpdf-core/src/pages.rs` | The page syntax (`1-3,7,10-`), shared by every front end. |
+| `crates/danonpdf-core/src/render.rs` | Draws a page as pixels and writes them as a PNG. `render/pdfium.rs` is the only file that knows PDFium. |
 | `crates/danonpdf-cli` | The command-line tool (`danonpdf-cli`): arguments in, a line or a JSON object out. |
 | `crates/danonpdf-cli/tests/cli.rs` | Runs the real program and checks its output and exit codes. |
 | `crates/danonpdf-desktop` | The desktop app (`danonpdf`), built with [egui](https://github.com/emilk/egui). |
