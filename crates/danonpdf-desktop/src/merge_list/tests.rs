@@ -325,14 +325,6 @@ fn failed_merge_is_recorded_with_its_whole_chain_of_causes() {
 }
 
 #[test]
-fn error_without_a_source_is_just_its_message() {
-    assert_eq!(
-        error_chain(&MergeError::NoInputs),
-        "there are no input files to merge"
-    );
-}
-
-#[test]
 fn merge_into_does_nothing_with_fewer_than_two_files() {
     let mut list = list_of(&["a.pdf"]);
     list.merge_into(doc("out.pdf"));
@@ -431,47 +423,6 @@ fn merge_into_refuses_a_name_that_becomes_an_input_once_pdf_is_added() {
             output: folder.join("b.pdf")
         }
     );
-}
-
-#[test]
-fn same_file_sees_through_different_spellings() {
-    let folder = fresh_folder("same-file");
-    let file = folder.join("a.pdf");
-    fs::write(&file, b"not really a pdf").unwrap();
-    fs::write(folder.join("b.pdf"), b"another").unwrap();
-
-    let dotted = folder.join(".").join("a.pdf");
-    let up_and_back = folder
-        .join("..")
-        .join(folder.file_name().unwrap())
-        .join("a.pdf");
-    let results = (
-        same_file(&file, &dotted),
-        same_file(&file, &up_and_back),
-        same_file(&file, &folder.join("b.pdf")),
-    );
-    fs::remove_dir_all(&folder).unwrap();
-
-    assert_eq!(results, (true, true, false));
-}
-
-#[test]
-fn same_file_compares_paths_that_do_not_exist_as_given() {
-    // Nothing is on disk here, so the system cannot help: equal text means
-    // the same file, and different text means different files.
-    assert!(same_file(&doc("a.pdf"), &doc("a.pdf")));
-    assert!(!same_file(&doc("a.pdf"), &doc("b.pdf")));
-}
-
-#[test]
-fn a_missing_output_is_never_the_same_as_an_existing_input() {
-    let folder = fresh_folder("missing-output");
-    let input = folder.join("a.pdf");
-    fs::write(&input, b"x").unwrap();
-    let result = same_file(&input, &folder.join("new.pdf"));
-    fs::remove_dir_all(&folder).unwrap();
-
-    assert!(!result);
 }
 
 #[test]

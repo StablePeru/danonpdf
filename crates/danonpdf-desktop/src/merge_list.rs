@@ -6,11 +6,9 @@
 //! window, and the drawing code stays a thin layer that reads the state and
 //! reports clicks.
 
-use std::error::Error;
-use std::fs;
 use std::path::{Path, PathBuf};
 
-use danonpdf_core::{MergeError, is_pdf_path, merge_files};
+use danonpdf_core::{MergeError, error_chain, is_pdf_path, merge_files, same_file};
 
 use crate::texts;
 
@@ -240,7 +238,8 @@ impl MergeList {
     }
 
     /// Whether `path` names one of the files in the list, however it is
-    /// spelled (see [`same_file`]).
+    /// spelled. [`same_file`] is the core's rule, shared with the
+    /// command-line tool so both refuse exactly the same outputs.
     fn is_input(&self, path: &Path) -> bool {
         self.files.iter().any(|file| same_file(file, path))
     }
@@ -300,39 +299,6 @@ impl SaveSuggestion {
     }
 }
 
-/// Whether `a` and `b` name the same file.
-///
-/// Comparing the paths as text is not enough: `docs/./a.pdf` and
-/// `docs/a.pdf` are the same file, and on Windows so are `C:\Docs\A.PDF`
-/// and `c:\docs\a.pdf`, because Windows ignores case in file names.
-/// `fs::canonicalize` asks the system for the one full path of each file,
-/// with `.`, `..` and links resolved and, on Windows, the case as stored on
-/// disk. The tests run on Linux, so they cover the first kind only; the
-/// case rule comes from Windows itself.
-///
-/// `canonicalize` fails for a path that does not exist. Then the paths are
-/// compared as given: a file that does not exist yet cannot be one of the
-/// inputs anyway, since the merge needs to read every input.
-///
-/// Known limits, accepted for now:
-///
-/// - A hard link is a second name for the same data, with its own path.
-///   `canonicalize` gives each name its own path, so a hard link to an
-///   input is not recognised as that input.
-/// - `canonicalize` can also fail for a file that does exist, for example
-///   when a folder on the way cannot be read. The paths are then compared
-///   as given too, so another spelling of the same file slips through.
-///
-/// Catching both would mean comparing file identities (device and inode on
-/// Linux, volume and file index on Windows), which std does not offer in a
-/// portable way.
-pub fn same_file(a: &Path, b: &Path) -> bool {
-    match (fs::canonicalize(a), fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    }
-}
-
 /// `path` with ".pdf" added when its file name has no extension at all.
 ///
 /// The Windows save dialog adds ".pdf" itself, but the Linux file chooser
@@ -366,21 +332,6 @@ pub fn display_name(path: &Path) -> String {
         Some(name) => name.to_string_lossy().into_owned(),
         None => path.display().to_string(),
     }
-}
-
-/// `error`'s message followed by the message of each error behind it,
-/// joined with ": ". For example: "cannot save out.pdf: access denied".
-pub fn error_chain(error: &dyn Error) -> String {
-    let mut message = error.to_string();
-    // `source()` gives the error behind this one, if any. Walking it until
-    // it returns `None` visits the whole chain, however long it is.
-    let mut cause = error.source();
-    while let Some(inner) = cause {
-        message.push_str(": ");
-        message.push_str(&inner.to_string());
-        cause = inner.source();
-    }
-    message
 }
 
 #[cfg(test)]

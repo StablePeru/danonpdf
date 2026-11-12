@@ -1,11 +1,15 @@
 //! The PDF logic of DanonPDF. It knows nothing about windows or buttons, so
 //! every piece of it can be tested without a screen.
 
+mod errors;
 mod merge;
+mod paths;
 
-// The `merge` module stays private; these three names are its public face,
-// so callers write `danonpdf_core::merge_files` and not the longer path.
+// The modules stay private; these names are their public face, so callers
+// write `danonpdf_core::merge_files` and not the longer path.
+pub use errors::error_chain;
 pub use merge::{MergeError, merge_documents, merge_files};
+pub use paths::same_file;
 
 use std::path::Path;
 
