@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use danonpdf_core::{PdfError, error_chain, name_is_taken, same_file};
+use danonpdf_core::{PdfError, WhichInput, error_chain, name_is_taken, same_file};
 
 use crate::texts;
 
@@ -222,8 +222,9 @@ where
 /// message, and the file it is about.
 ///
 /// `inputs` is the list the operation was called with. Two kinds of error
-/// only carry the place of the input in that list, counted from 1; with the
-/// list at hand, the path can be looked up for the caller.
+/// do not carry a path, only which input they are about (the only one, or
+/// its place in the list); with the list at hand, the path can be looked
+/// up for the caller.
 pub fn failure_from<P: AsRef<Path>>(error: &PdfError, inputs: &[P]) -> Failure {
     // No `_ =>` arm, on purpose. With one, a variant added to `PdfError`
     // later would fall into it silently and reach callers under a wrong
@@ -232,8 +233,8 @@ pub fn failure_from<P: AsRef<Path>>(error: &PdfError, inputs: &[P]) -> Failure {
     let (code, path) = match error {
         PdfError::NoInputs => (ErrorCode::NoInputs, None),
         PdfError::Read { path, .. } => (ErrorCode::ReadFailed, Some(path.clone())),
-        PdfError::Encrypted { input } => (ErrorCode::Encrypted, nth_input(inputs, *input)),
-        PdfError::Broken { input, .. } => (ErrorCode::BrokenPdf, nth_input(inputs, *input)),
+        PdfError::Encrypted { input } => (ErrorCode::Encrypted, path_of(inputs, *input)),
+        PdfError::Broken { input, .. } => (ErrorCode::BrokenPdf, path_of(inputs, *input)),
         // About the pages that were asked for, not about a file: no path.
         PdfError::PageOutOfRange { .. } => (ErrorCode::PageOutOfRange, None),
         // Two ways for the output not to reach the disk, one code: a caller
@@ -254,13 +255,24 @@ pub fn failure_from<P: AsRef<Path>>(error: &PdfError, inputs: &[P]) -> Failure {
     }
 }
 
-/// The path of input number `number`, counted from 1 as the core does.
-/// `None` when there is no such input.
-fn nth_input<P: AsRef<Path>>(inputs: &[P], number: usize) -> Option<PathBuf> {
-    // `checked_sub` gives `None` for 0 instead of wrapping below zero, and
-    // `get` gives `None` past the end instead of panicking as `inputs[i]`
-    // would. `?` passes the first `None` on.
-    let input = inputs.get(number.checked_sub(1)?)?;
+/// The path of the input that `which` speaks of. `None` when the list has
+/// no such input.
+///
+/// The message words the two cases differently ("the file", "input 2"),
+/// but a caller that reads `path` gets the file either way.
+fn path_of<P: AsRef<Path>>(inputs: &[P], which: WhichInput) -> Option<PathBuf> {
+    // No `_ =>` arm here either: a third way of naming an input would have
+    // to say where its path is.
+    let input = match which {
+        // An operation that reads one file is called with a list of one.
+        // `first` gives `None` for an empty list instead of panicking.
+        WhichInput::Only => inputs.first()?,
+        // The core counts from 1. `checked_sub` gives `None` for 0 instead
+        // of wrapping below zero, and `get` gives `None` past the end
+        // instead of panicking as `inputs[i]` would. `?` passes the first
+        // `None` on.
+        WhichInput::Numbered(number) => inputs.get(number.checked_sub(1)?)?,
+    };
     Some(input.as_ref().to_path_buf())
 }
 
@@ -292,13 +304,15 @@ mod tests {
                 Some("second.pdf"),
             ),
             (
-                PdfError::Encrypted { input: 2 },
+                PdfError::Encrypted {
+                    input: WhichInput::Numbered(2),
+                },
                 ErrorCode::Encrypted,
                 Some("second.pdf"),
             ),
             (
                 PdfError::Broken {
-                    input: 1,
+                    input: WhichInput::Numbered(1),
                     reason: "it has no catalog",
                 },
                 ErrorCode::BrokenPdf,
@@ -342,12 +356,48 @@ mod tests {
         // The core counts inputs from 1, so 0 is never a real input, and 3
         // is past the end of a list of two. Neither may panic or name a
         // wrong file.
-        for input in [0, 3] {
-            let failure = failure_from(&PdfError::Encrypted { input }, &two_inputs());
+        for number in [0, 3] {
+            let error = PdfError::Encrypted {
+                input: WhichInput::Numbered(number),
+            };
+            let failure = failure_from(&error, &two_inputs());
 
             assert_eq!(failure.code, ErrorCode::Encrypted);
-            assert_eq!(failure.path, None, "input {input}");
+            assert_eq!(failure.path, None, "input {number}");
         }
+    }
+
+    #[test]
+    fn an_error_about_the_only_input_names_that_file_and_no_number() {
+        // `info`, `extract` and `split` read one file. The code and the
+        // path are what they are for a merge; only the words differ.
+        let report = [Path::new("report.pdf")];
+
+        let encrypted = PdfError::Encrypted {
+            input: WhichInput::Only,
+        };
+        let failure = failure_from(&encrypted, &report);
+        assert_eq!(failure.code, ErrorCode::Encrypted);
+        assert_eq!(failure.path.as_deref(), Some(Path::new("report.pdf")));
+        assert_eq!(
+            failure.message,
+            "the file is encrypted and needs a password"
+        );
+
+        let broken = PdfError::Broken {
+            input: WhichInput::Only,
+            reason: "it has no catalog",
+        };
+        let failure = failure_from(&broken, &report);
+        assert_eq!(failure.code, ErrorCode::BrokenPdf);
+        assert_eq!(failure.path.as_deref(), Some(Path::new("report.pdf")));
+        assert_eq!(failure.message, "the file is damaged: it has no catalog");
+
+        // Called with no list at all, there is no file to name. That must
+        // not panic. The type of the empty list has to be written out,
+        // because nothing in it tells the compiler what it would hold.
+        let nothing: [&Path; 0] = [];
+        assert_eq!(failure_from(&encrypted, &nothing).path, None);
     }
 
     #[test]

@@ -106,7 +106,12 @@ fn page_count_refuses_what_a_merge_refuses() {
     }
     let result = page_count(&locked);
     assert!(
-        matches!(result, Err(PdfError::Encrypted { input: 1 })),
+        matches!(
+            result,
+            Err(PdfError::Encrypted {
+                input: WhichInput::Only
+            })
+        ),
         "got {result:?}"
     );
 }
@@ -267,7 +272,12 @@ fn extract_refuses_unreadable_and_encrypted_inputs() {
     }
     let result = extract_file(&locked, &selection("1"), &output);
     assert!(
-        matches!(result, Err(PdfError::Encrypted { input: 1 })),
+        matches!(
+            result,
+            Err(PdfError::Encrypted {
+                input: WhichInput::Only
+            })
+        ),
         "got {result:?}"
     );
     assert!(!output.exists(), "nothing should be written");
@@ -306,7 +316,7 @@ fn a_damaged_input_is_broken_as_input_1() {
         matches!(
             result,
             Err(PdfError::Broken {
-                input: 1,
+                input: WhichInput::Only,
                 reason: "it has no page tree"
             })
         ),
@@ -329,7 +339,7 @@ fn a_page_tree_that_names_a_missing_page_is_broken() {
         matches!(
             result,
             Err(PdfError::Broken {
-                input: 1,
+                input: WhichInput::Only,
                 reason: "a page in its page tree is missing"
             })
         ),
@@ -349,7 +359,7 @@ fn pages_whose_objects_leave_no_number_free_are_refused() {
             matches!(
                 result,
                 Err(PdfError::Broken {
-                    input: 1,
+                    input: WhichInput::Only,
                     reason: "its object numbers leave no room for a new page tree"
                 })
             ),
@@ -633,7 +643,12 @@ fn split_refuses_unreadable_and_encrypted_inputs_before_planning() {
     }
     let error = plan_split(&locked, every(1), &folder).err();
     assert!(
-        matches!(error, Some(PdfError::Encrypted { input: 1 })),
+        matches!(
+            error,
+            Some(PdfError::Encrypted {
+                input: WhichInput::Only
+            })
+        ),
         "got {error:?}"
     );
     assert!(!folder.exists(), "nothing should be written");
@@ -695,7 +710,7 @@ fn a_split_stops_at_a_part_that_cannot_be_built_and_keeps_the_ones_before() {
         matches!(
             error.error,
             PdfError::Broken {
-                input: 1,
+                input: WhichInput::Only,
                 reason: "its object numbers leave no room for a new page tree"
             }
         ),
@@ -714,7 +729,7 @@ fn a_split_stops_at_a_part_that_cannot_be_built_and_keeps_the_ones_before() {
     assert_eq!(names, ["a-001.pdf"]);
     assert_eq!(
         error_chain(&error),
-        "the split stopped after 1 of 3 files: input 1 is damaged: \
+        "the split stopped after 1 of 3 files: the file is damaged: \
          its object numbers leave no room for a new page tree"
     );
 }

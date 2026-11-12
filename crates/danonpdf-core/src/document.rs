@@ -14,7 +14,7 @@ use std::path::Path;
 
 use lopdf::{Dictionary, Document, Object, ObjectId, dictionary};
 
-use crate::PdfError;
+use crate::{PdfError, WhichInput};
 
 /// Page attributes that a page may inherit from the `Pages` nodes above it
 /// instead of storing them itself (PDF 1.7, section 7.7.3.4).
@@ -24,16 +24,18 @@ const INHERITABLE_KEYS: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"R
 /// is not in the file.
 const MISSING_PAGE: &str = "a page in its page tree is missing";
 
-/// What is wrong with one input, before we know its place in the list.
+/// What is wrong with one input, before we know which input it is: the
+/// checks that find the problem are shared by every operation, and only
+/// the operation knows whether it reads a list or a single file.
 pub(crate) enum InputProblem {
     Encrypted,
     Broken(&'static str),
 }
 
 impl InputProblem {
-    /// The error for the caller, now that the place of the input is known.
-    /// Inputs are counted from 1.
-    pub(crate) fn at(self, input: usize) -> PdfError {
+    /// The error for the caller, now that it is known which input this
+    /// is: the only one, or one of a list.
+    pub(crate) fn at(self, input: WhichInput) -> PdfError {
         match self {
             Self::Encrypted => PdfError::Encrypted { input },
             Self::Broken(reason) => PdfError::Broken { input, reason },

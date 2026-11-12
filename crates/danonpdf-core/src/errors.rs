@@ -21,10 +21,40 @@ use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
 
+/// Which input an error is about.
+///
+/// A merge takes a list of files and tells them apart by their place in
+/// it. The operations that read one file (counting its pages, extract,
+/// split) have no list, and calling their file "input 1" would be the
+/// wording of a merge in the wrong place.
+///
+/// The difference is settled here, in the core, because this is where it
+/// is known: each operation says which of the two it is when it reports
+/// the error. Both front ends show the message as it comes, so neither has
+/// to reword it, and they cannot end up wording it differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhichInput {
+    /// The one file of an operation that reads a single file.
+    Only,
+    /// The input at this place in the list, counted from 1 in the order
+    /// the inputs were given, so the caller (which has the list) can name
+    /// the file.
+    Numbered(usize),
+}
+
+impl fmt::Display for WhichInput {
+    /// The words that start the message: "the file" or "input 2".
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Only => write!(f, "the file"),
+            Self::Numbered(number) => write!(f, "input {number}"),
+        }
+    }
+}
+
 /// Everything that can stop an operation of the core.
 ///
-/// `input` counts the inputs from 1, in the order they were given, so the
-/// caller (which has the list) can name the file.
+/// `input` says which input the error is about (see [`WhichInput`]).
 #[derive(Debug)]
 pub enum PdfError {
     /// The list of inputs was empty.
@@ -32,9 +62,12 @@ pub enum PdfError {
     /// An input file could not be read, or is not a PDF.
     Read { path: PathBuf, source: lopdf::Error },
     /// An input is encrypted and needs a password to be opened.
-    Encrypted { input: usize },
+    Encrypted { input: WhichInput },
     /// An input opened, but its structure is broken.
-    Broken { input: usize, reason: &'static str },
+    Broken {
+        input: WhichInput,
+        reason: &'static str,
+    },
     /// A page selection names a page that the document does not have:
     /// `page`, in a document of `pages` pages.
     PageOutOfRange { page: usize, pages: usize },
@@ -62,10 +95,12 @@ impl fmt::Display for PdfError {
             // of inputs. The caller knows what it asked for.
             Self::NoInputs => write!(f, "there are no input files"),
             Self::Read { path, .. } => write!(f, "cannot read {} as a PDF", path.display()),
+            // `{input}` prints a `WhichInput`, which is "the file" or
+            // "input 2": the rest of the sentence is the same for both.
             Self::Encrypted { input } => {
-                write!(f, "input {input} is encrypted and needs a password")
+                write!(f, "{input} is encrypted and needs a password")
             }
-            Self::Broken { input, reason } => write!(f, "input {input} is damaged: {reason}"),
+            Self::Broken { input, reason } => write!(f, "{input} is damaged: {reason}"),
             Self::PageOutOfRange { page, pages } => {
                 // A `match` is an expression: each arm gives the text for
                 // one case, and `_` takes every number that is not 1.
@@ -138,9 +173,47 @@ mod tests {
             source: lopdf::Error::InvalidPassword,
         };
         assert_eq!(read.to_string(), "cannot read a.pdf as a PDF");
+    }
+
+    #[test]
+    fn an_input_of_a_list_is_named_by_its_number() {
+        // The wording of a merge: the number is what tells its inputs
+        // apart.
         assert_eq!(
-            PdfError::Encrypted { input: 2 }.to_string(),
+            PdfError::Encrypted {
+                input: WhichInput::Numbered(2)
+            }
+            .to_string(),
             "input 2 is encrypted and needs a password"
+        );
+        assert_eq!(
+            PdfError::Broken {
+                input: WhichInput::Numbered(1),
+                reason: "it has no catalog"
+            }
+            .to_string(),
+            "input 1 is damaged: it has no catalog"
+        );
+    }
+
+    #[test]
+    fn the_only_input_of_an_operation_is_not_given_a_number() {
+        // Counting pages, extract and split read one file. "input 1" would
+        // make their user look for an input 2.
+        assert_eq!(
+            PdfError::Encrypted {
+                input: WhichInput::Only
+            }
+            .to_string(),
+            "the file is encrypted and needs a password"
+        );
+        assert_eq!(
+            PdfError::Broken {
+                input: WhichInput::Only,
+                reason: "it has no catalog"
+            }
+            .to_string(),
+            "the file is damaged: it has no catalog"
         );
     }
 

@@ -583,8 +583,8 @@ mod tests {
             "Could not split: cannot read a.pdf as a PDF: no such file"
         );
         assert_eq!(
-            not_accepted("locked.pdf", "input 1 is encrypted and needs a password"),
-            "Cannot use locked.pdf: input 1 is encrypted and needs a password"
+            not_accepted("locked.pdf", "the file is encrypted and needs a password"),
+            "Cannot use locked.pdf: the file is encrypted and needs a password"
         );
         assert_eq!(
             pages_invalid("page 9 is past the end of the document, which has 5 pages"),

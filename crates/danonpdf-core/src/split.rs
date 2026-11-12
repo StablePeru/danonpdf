@@ -43,7 +43,7 @@ use crate::document::{
     DetachedPages, InputProblem, detach_pages, install_page_tree, is_locked, load, set_parent,
 };
 use crate::save::{Durability, save};
-use crate::{PageSelection, PdfError};
+use crate::{PageSelection, PdfError, WhichInput};
 
 /// How many pages the PDF file `input` has.
 ///
@@ -98,15 +98,16 @@ impl Source {
 
     /// Checks `document` and gets its pages ready to leave it.
     ///
-    /// There is one input here, so every problem is reported for input 1.
+    /// There is one input here, so every problem is reported for "the
+    /// file" ([`WhichInput::Only`]) and not for a numbered input.
     fn new(mut document: Document) -> Result<Self, PdfError> {
         if is_locked(&document) {
-            return Err(InputProblem::Encrypted.at(1));
+            return Err(InputProblem::Encrypted.at(WhichInput::Only));
         }
         // Each page now holds the attributes it used to inherit, so it can
         // be given to a new document without its old page tree.
         let DetachedPages { pages, old_nodes } =
-            detach_pages(&mut document).map_err(|problem| problem.at(1))?;
+            detach_pages(&mut document).map_err(|problem| problem.at(WhichInput::Only))?;
 
         // `old_nodes` is moved into `fence` (no copy) and the pages are
         // added to it. `copied()` turns the `&ObjectId`s that `iter()`
@@ -146,7 +147,8 @@ impl Source {
         // drops the rest, in place.
         objects.retain(|id, _| used.contains(id));
 
-        new_document(&self.document.version, objects, &chosen).map_err(|problem| problem.at(1))
+        new_document(&self.document.version, objects, &chosen)
+            .map_err(|problem| problem.at(WhichInput::Only))
     }
 
     /// A new document made of `pages` (ids of pages of this source), in
@@ -164,7 +166,8 @@ impl Source {
             .filter_map(|id| Some((id, self.document.objects.get(&id)?.clone())))
             .collect();
 
-        new_document(&self.document.version, objects, pages).map_err(|problem| problem.at(1))
+        new_document(&self.document.version, objects, pages)
+            .map_err(|problem| problem.at(WhichInput::Only))
     }
 }
 

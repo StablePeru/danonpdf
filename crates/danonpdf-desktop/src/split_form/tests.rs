@@ -6,7 +6,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use danonpdf_core::SplitError;
+use danonpdf_core::{SplitError, WhichInput};
 
 use super::*;
 use crate::test_support::{ScratchDir, entries_of, page_widths};
@@ -163,7 +163,10 @@ fn a_file_that_needs_a_password_or_is_missing_is_not_accepted() {
             file: locked,
             // The wording is the core's, so it is asked for and not copied:
             // a change of words there must not fail a test here.
-            message: PdfError::Encrypted { input: 1 }.to_string()
+            message: PdfError::Encrypted {
+                input: WhichInput::Only
+            }
+            .to_string()
         }
     );
 

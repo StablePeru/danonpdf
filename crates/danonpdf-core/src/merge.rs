@@ -22,9 +22,9 @@ use std::path::Path;
 
 use lopdf::{Document, ObjectId};
 
-use crate::PdfError;
 use crate::document::{InputProblem, detach_pages, install_page_tree, is_locked, load, set_parent};
 use crate::save::{Durability, save};
+use crate::{PdfError, WhichInput};
 
 /// Merges `documents` into a new document: all the pages of the first one,
 /// then all the pages of the second one, and so on.
@@ -75,9 +75,10 @@ pub fn merge_documents(documents: Vec<Document>) -> Result<Document, PdfError> {
     // `&Document`, and moving out of a borrow is not allowed.
     for (index, mut document) in documents.into_iter().enumerate() {
         // `map_err` turns the problem into a `PdfError`, then `?` returns
-        // it from `merge_documents` if there was one.
+        // it from `merge_documents` if there was one. `enumerate` counts
+        // from 0 and people count from 1, hence `index + 1`.
         let page_ids = take_pages(&mut document, next_id, pages_id)
-            .map_err(|problem| problem.at(index + 1))?;
+            .map_err(|problem| problem.at(WhichInput::Numbered(index + 1)))?;
 
         next_id = document.max_id + 1;
         // `extend` with the map itself (not `&document.objects`) moves every

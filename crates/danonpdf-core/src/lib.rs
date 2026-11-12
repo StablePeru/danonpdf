@@ -13,7 +13,7 @@ mod test_support;
 
 // The modules stay private; these names are their public face, so callers
 // write `danonpdf_core::merge_files` and not the longer path.
-pub use errors::{PdfError, error_chain};
+pub use errors::{PdfError, WhichInput, error_chain};
 pub use merge::{merge_documents, merge_files};
 pub use pages::{PageSelection, PageSyntaxError};
 pub use paths::{name_is_taken, same_file};

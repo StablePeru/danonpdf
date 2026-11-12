@@ -18,6 +18,6 @@ pub fn run(input: &Path) -> Result<Report, Failure> {
             pages,
         })
         // `&[input]` is the list of inputs, with its one entry: an error
-        // that says "input 1" then finds its path there.
+        // about "the file" then finds its path there.
         .map_err(|error| failure_from(&error, &[input]))
 }

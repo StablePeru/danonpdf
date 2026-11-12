@@ -426,7 +426,8 @@ fn missing_input_is_read_failed_with_its_path() {
 #[test]
 fn encrypted_input_is_reported_with_its_path() {
     // The core only says "input 2"; the tool knows the list, so it can name
-    // the file for a caller that reads `path`.
+    // the file for a caller that reads `path`. The number stays in the
+    // message: with several inputs it is what tells them apart.
     let scratch = ScratchDir::new("encrypted");
     let plain = scratch.pdf("plain.pdf", 1);
     let locked = scratch.file("locked.pdf");
@@ -437,8 +438,17 @@ fn encrypted_input_is_reported_with_its_path() {
 
     let error = error_of(&result, "encrypted");
     assert_eq!(error["path"], text(&locked));
+    assert_eq!(
+        error["message"],
+        "input 2 is encrypted and needs a password"
+    );
     assert!(!out.exists(), "nothing should be written");
 }
+
+/// What `info`, `extract` and `split` say about a file that needs a
+/// password. They read one file, so there is no "input 1" to speak of:
+/// that wording belongs to `merge`, which takes a list.
+const THE_FILE_IS_ENCRYPTED: &str = "the file is encrypted and needs a password";
 
 #[test]
 fn output_in_a_missing_folder_is_save_failed() {
@@ -662,6 +672,7 @@ fn info_reports_what_it_cannot_read_with_its_path() {
     assert_eq!(error["path"], text(&missing));
     let error = failure_of(&info(&["--json"], &locked), "info", "encrypted");
     assert_eq!(error["path"], text(&locked));
+    assert_eq!(error["message"], THE_FILE_IS_ENCRYPTED);
 }
 
 // extract
@@ -807,6 +818,7 @@ fn extract_reports_an_encrypted_input_with_its_path() {
 
     let error = failure_of(&result, "extract", "encrypted");
     assert_eq!(error["path"], text(&locked));
+    assert_eq!(error["message"], THE_FILE_IS_ENCRYPTED);
     assert!(!out.exists(), "nothing should be written");
 }
 
@@ -993,6 +1005,21 @@ fn split_never_writes_over_its_input() {
         assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
         assert_eq!(entries_of(&folder), ["doc-002.pdf"]);
     }
+}
+
+#[test]
+fn split_reports_an_encrypted_input_with_its_path() {
+    let scratch = ScratchDir::new("split-encrypted");
+    let locked = scratch.file("locked.pdf");
+    encrypted(with_pages(2), "secret").save(&locked).unwrap();
+    let folder = scratch.file("parts");
+
+    let result = split(&["--json"], &folder, &locked);
+
+    let error = failure_of(&result, "split", "encrypted");
+    assert_eq!(error["path"], text(&locked));
+    assert_eq!(error["message"], THE_FILE_IS_ENCRYPTED);
+    assert!(!folder.exists(), "nothing should be written");
 }
 
 #[test]

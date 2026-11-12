@@ -131,7 +131,12 @@ fn encrypted_input_is_rejected() {
     let result = merge_files(&[plain, locked], &scratch.file("merged.pdf"));
 
     assert!(
-        matches!(result, Err(PdfError::Encrypted { input: 2 })),
+        matches!(
+            result,
+            Err(PdfError::Encrypted {
+                input: WhichInput::Numbered(2)
+            })
+        ),
         "got {result:?}"
     );
 }
@@ -143,7 +148,12 @@ fn encrypted_document_in_memory_is_rejected() {
     let result = merge_documents(vec![locked]);
 
     assert!(
-        matches!(result, Err(PdfError::Encrypted { input: 1 })),
+        matches!(
+            result,
+            Err(PdfError::Encrypted {
+                input: WhichInput::Numbered(1)
+            })
+        ),
         "got {result:?}"
     );
 }
@@ -184,7 +194,7 @@ fn input_without_page_tree_is_broken() {
         matches!(
             result,
             Err(PdfError::Broken {
-                input: 2,
+                input: WhichInput::Numbered(2),
                 reason: "it has no page tree"
             })
         ),
@@ -214,7 +224,7 @@ fn input_without_catalog_is_broken() {
             matches!(
                 result,
                 Err(PdfError::Broken {
-                    input: 2,
+                    input: WhichInput::Numbered(2),
                     reason: "it has no catalog"
                 })
             ),
@@ -237,7 +247,7 @@ fn input_with_empty_page_tree_is_broken() {
         matches!(
             result,
             Err(PdfError::Broken {
-                input: 2,
+                input: WhichInput::Numbered(2),
                 reason: "its page tree has no pages"
             })
         ),
