@@ -6,9 +6,68 @@ FROM rust:1.99.1-slim-trixie
 #   It is the Rust target's default linker (x86_64-w64-mingw32-gcc), so no
 #   extra Cargo configuration is needed.
 # file: lets scripts and humans check what kind of binary came out.
+# curl, ca-certificates: download PDFium below, over HTTPS. Nothing else in
+#   the image uses curl.
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends gcc-mingw-w64-x86-64 file \
+    && apt-get install --yes --no-install-recommends \
+        gcc-mingw-w64-x86-64 file curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# PDFium, the library that draws PDF pages. DanonPDF does not compile it
+# (that takes Chromium's build system and a long time): it loads a prebuilt
+# library when it runs, libpdfium.so on Linux and pdfium.dll on Windows.
+# The binaries come from https://github.com/bblanchon/pdfium-binaries, one
+# release per PDFium build. The build number must be the one that the
+# pdfium-render crate is told to bind to (its `pdfium_8125` feature in
+# Cargo.toml): the two change together.
+#
+# The release publishes no checksum file, so the SHA-256 of each archive is
+# pinned here. A download that does not match stops the build before
+# anything is unpacked. The README says how to move to another build
+# ("Bumping PDFium").
+#
+# .dockerignore keeps the build context empty, so the hashes cannot come
+# from a file in the repository: they are build arguments with defaults.
+ARG PDFIUM_BUILD=8125
+ARG PDFIUM_LINUX_X64_SHA256=e1c3ce6e270cb5e0c20816b379ad9f2c1309972697c505f508de92bf5e7d6659
+ARG PDFIUM_WIN_X64_SHA256=9a964261760cff52570aabf038ab346d3a5034dd8b30d0d5fe8861235d356b8b
+
+# /opt/pdfium/linux    lib/libpdfium.so: what the tests load in this image.
+# /opt/pdfium/windows  bin/pdfium.dll: what scripts/build-windows.sh ships
+#                      next to the .exe files.
+# Both keep LICENSE, licenses/ and VERSION from their archive. Only the
+# members named are unpacked (the archives also hold C headers and an import
+# library that nothing here uses), and tar fails if one of them is missing.
+# Everything is owned by root and readable by all: the "builder" user below
+# only reads it.
+#
+# The last lines check what was unpacked, not only what was downloaded: that
+# VERSION names the build asked for, and that each library is of the kind
+# its folder says (`file` exits 0 whatever it finds, hence the grep).
+RUN set -eu; \
+    base="https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F${PDFIUM_BUILD}"; \
+    cd /tmp; \
+    for archive in pdfium-linux-x64.tgz pdfium-win-x64.tgz; do \
+        curl --fail --silent --show-error --location --proto '=https' \
+            --output "$archive" "$base/$archive"; \
+    done; \
+    printf '%s  %s\n' \
+        "${PDFIUM_LINUX_X64_SHA256}" pdfium-linux-x64.tgz \
+        "${PDFIUM_WIN_X64_SHA256}" pdfium-win-x64.tgz \
+        | sha256sum --check --strict -; \
+    mkdir -p /opt/pdfium/linux /opt/pdfium/windows; \
+    tar --extract --gzip --no-same-owner --file pdfium-linux-x64.tgz \
+        --directory /opt/pdfium/linux LICENSE VERSION licenses lib/libpdfium.so; \
+    tar --extract --gzip --no-same-owner --file pdfium-win-x64.tgz \
+        --directory /opt/pdfium/windows LICENSE VERSION licenses bin/pdfium.dll; \
+    rm pdfium-linux-x64.tgz pdfium-win-x64.tgz; \
+    chmod -R a+rX /opt/pdfium; \
+    grep --quiet --line-regexp "BUILD=${PDFIUM_BUILD}" /opt/pdfium/linux/VERSION; \
+    grep --quiet --line-regexp "BUILD=${PDFIUM_BUILD}" /opt/pdfium/windows/VERSION; \
+    file --brief /opt/pdfium/linux/lib/libpdfium.so \
+        | grep --quiet 'ELF 64-bit.*shared object.*x86-64'; \
+    file --brief /opt/pdfium/windows/bin/pdfium.dll \
+        | grep --quiet 'PE32+.*(DLL).*x86-64'
 
 # Installed as root into the image's RUSTUP_HOME, so every container gets
 # them without downloading anything at run time.
@@ -40,6 +99,13 @@ RUN if ! getent group "${GID}" > /dev/null; then \
 # The rustup proxies (cargo, rustc...) stay on PATH from /usr/local/cargo/bin.
 ENV CARGO_HOME=/home/builder/.cargo \
     CARGO_TARGET_DIR=/home/builder/target
+
+# The folder that holds the PDFium library for this platform. DanonPDF looks
+# next to its own executable by default; this variable is the documented way
+# to point it somewhere else. In this image the executable is a test binary
+# deep in the target folder, so tests and `cargo run` need the variable to
+# find the library unpacked above.
+ENV DANONPDF_PDFIUM_DIR=/opt/pdfium/linux/lib
 
 USER builder
 WORKDIR /workspace

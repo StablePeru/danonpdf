@@ -133,7 +133,7 @@ docker compose run --rm build cargo test --workspace
 docker compose run --rm build bash scripts/build-windows.sh
 ```
 
-The last command cross-compiles both Windows programs and leaves them in `dist/`: `danonpdf.exe`, the desktop app, and `danonpdf-cli.exe`, the command-line tool. Run them on Windows: a window does not open from inside a container.
+The last command cross-compiles both Windows programs and leaves them in `dist/`: `danonpdf.exe`, the desktop app, and `danonpdf-cli.exe`, the command-line tool. Next to them it puts `pdfium.dll` and, in `dist/licenses/pdfium/`, the licence texts that go with it (see [PDFium](#pdfium)). Keep the three files and that folder together. Run the programs on Windows: a window does not open from inside a container.
 
 Downloaded crates and build output are kept in Docker volumes, not in the checkout. On Linux, build the image with your own user so the files the container writes stay yours:
 
@@ -146,6 +146,24 @@ A named volume keeps the owner it had the first time it was used. If you change 
 ```sh
 docker compose down --volumes
 ```
+
+## PDFium
+
+To draw a page, DanonPDF uses [PDFium](https://pdfium.googlesource.com/pdfium/), the PDF library of Chromium. It is the only part that is not Rust and not compiled here: it is a prebuilt library that the program loads when it runs, `pdfium.dll` on Windows and `libpdfium.so` on Linux. The build ships it already; the programs do not use it yet.
+
+- **Where it comes from.** The [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) project, which builds PDFium and publishes one release per build.
+- **Which one.** The release tagged `chromium/8125`: `pdfium-win-x64.tgz` and `pdfium-linux-x64.tgz`.
+- **When it is downloaded.** Only while the build image is made (`docker compose build`), never by the programs. The `Dockerfile` pins the SHA-256 of both archives, and a download that does not match stops the build.
+- **Where it ends up.** In the image, under `/opt/pdfium/`. `scripts/build-windows.sh` copies the DLL to `dist/pdfium.dll`.
+
+**Licences.** PDFium is under the BSD 3-Clause and Apache 2.0 licences, and it has other libraries built into it (FreeType, ICU, libjpeg-turbo, OpenJPEG, zlib and more), each under its own permissive licence. Those licences ask for their text to go with every copy of the binary, so `dist/licenses/pdfium/` holds all of them as they come in the release: `licenses/pdfium.txt` for PDFium, one file for each library in it, and `LICENSE`, the MIT licence of the pdfium-binaries packaging. `VERSION` there says which build the DLL is. DanonPDF itself stays under GPL-3.0. The BSD 3-Clause and Apache 2.0 licences are both compatible with version 3 of the GPL (Apache 2.0 is not compatible with version 2).
+
+### Bumping PDFium
+
+1. Pick a release of pdfium-binaries whose build number the `pdfium-render` crate supports: it has one `pdfium_NNNN` feature per build it can bind to.
+2. In the `Dockerfile`, set `PDFIUM_BUILD` to that number.
+3. Download the two archives of that release and compute their hashes with `sha256sum`. Compare each with the `digest` that GitHub shows for the asset on the release page. Only if they agree, write them into `PDFIUM_LINUX_X64_SHA256` and `PDFIUM_WIN_X64_SHA256`.
+4. Rebuild the image with `docker compose build`, then run the tests and `scripts/build-windows.sh` again.
 
 ## Try merging from the command line
 
@@ -174,9 +192,10 @@ It prints how many pages it wrote, or why it could not merge.
 | `crates/danonpdf-desktop/src/split_view.rs` | Draws the Split view. |
 | `crates/danonpdf-desktop/src/dialogs.rs`, `drops.rs` | The system's file dialogs, and files dropped on the window. |
 | `crates/danonpdf-desktop/src/texts.rs` | Every text the user sees, ready for a translation. |
-| `scripts/build-windows.sh` | Builds `dist/danonpdf.exe` and `dist/danonpdf-cli.exe`. |
+| `Dockerfile`, `compose.yaml` | The build image: the Rust toolchain, the Windows cross-compiler and the pinned PDFium binaries. |
+| `scripts/build-windows.sh` | Builds `dist/danonpdf.exe` and `dist/danonpdf-cli.exe`, and puts `pdfium.dll` and its licences next to them. |
 | `AGENTS.md` | How an AI agent uses `danonpdf-cli` and works on this repository. |
 
 ## License
 
-[GPL-3.0](LICENSE).
+[GPL-3.0](LICENSE). The PDFium library that ships next to the programs keeps its own licences: see [PDFium](#pdfium).
