@@ -2,7 +2,7 @@
 
 DanonPDF will be a free, fast desktop tool for everyday PDF work: merge, split, rotate, reorder and delete pages with thumbnails, compress, and turn images into PDF. Windows first, Linux later. It is part of DanonAA.
 
-> **Status:** early work. The app can merge PDF files, extract pages from one and split one into several files, from the window or from the command line. The other tools do not exist.
+> **Status:** early work. The app can merge PDF files, extract pages from one and split one into several files, from the window or from the command line. The command line can also draw a page as a PNG image; the window does not show pages yet. The other tools do not exist.
 
 The window has two views, **Merge** and **Split**, chosen with the two buttons at the top. It opens on Merge. Files dropped on the window go to the view that is shown, and each view keeps what it holds while the other one is open.
 
@@ -47,6 +47,7 @@ danonpdf-cli merge --output merged.pdf first.pdf second.pdf
 danonpdf-cli info report.pdf
 danonpdf-cli extract --pages 1-3,7,10- --output part.pdf report.pdf
 danonpdf-cli split --every 10 --output-dir parts report.pdf
+danonpdf-cli render --page 1 --output page.png report.pdf
 ```
 
 | Command | What it does | What it prints |
@@ -55,6 +56,7 @@ danonpdf-cli split --every 10 --output-dir parts report.pdf
 | `info` | Counts the pages of a file. | `report.pdf has 12 pages` |
 | `extract` | Copies the chosen pages, in the order given, into one new file. | `Extracted 7 pages into part.pdf` |
 | `split` | Writes the pages into files of `--every` pages each (one page each without it). | `Split 12 pages into 2 files: parts/report-001.pdf to parts/report-002.pdf` |
+| `render` | Draws one page and writes it as a PNG image. See [Drawing a page](#drawing-a-page). | `Rendered page 1 (1024 by 1449 pixels) into page.png` |
 
 When a command fails, it prints `error: …` on stderr instead. With `--json`, every command prints exactly one JSON object on stdout, for a success and for a failure alike, and nothing on stderr:
 
@@ -63,6 +65,7 @@ When a command fails, it prints `error: …` on stderr instead. With `--json`, e
 {"ok":true,"operation":"info","input":"report.pdf","pages":12}
 {"ok":true,"operation":"extract","output":"part.pdf","pages":7}
 {"ok":true,"operation":"split","outputs":["parts/report-001.pdf","parts/report-002.pdf"],"files":2,"pages":12}
+{"ok":true,"operation":"render","output":"page.png","page":1,"width":1024,"height":1449}
 {"ok":false,"operation":"merge","error":{"code":"output_exists","message":"…","path":"merged.pdf"}}
 ```
 
@@ -84,10 +87,25 @@ When a command fails, it prints `error: …` on stderr instead. With `--json`, e
 
 So `1-3,7,10-` on a 12-page file takes pages 1, 2, 3, 7, 10, 11 and 12, and `3,1` puts page 3 before page 1. A list that cannot be read (`5-3`, `1,,3`, page 0, the same page twice) is a wrong command line: exit code `2`. A page past the end of the file is the failure `page_out_of_range`: exit code `1`. `info` tells how many pages there are.
 
+### Drawing a page
+
+`render` draws one page of a file and writes it as a PNG image, so a script or an agent can look at a page without a window.
+
+| Flag | Meaning |
+| --- | --- |
+| `--page <N>` | The page to draw, counted from 1. Required. |
+| `--width <PX>` | The width of the image in pixels, from 1 to 4096. Without it: 1024. The height follows from the shape of the page: an A4 page drawn 1024 pixels wide is 1449 pixels high. |
+| `--output <FILE>` | Where to write the image. The name must end in `.png`, in any letter case. Required. |
+
+- **The report gives the real size.** A very tall page is drawn narrower than asked, so that its image is at most 8192 pixels high. Read `width` and `height` from the report, not from the command line.
+- **The image is plain.** 8 bits per channel with alpha, on white paper that is fully opaque.
+- **Mistakes in the command line end with exit code `2`.** That covers `--page 0`, a `--width` out of range and an `--output` that does not end in `.png`. A page past the end of the file is the failure `page_out_of_range`, with exit code `1`.
+- **It needs the PDFium library; the other commands do not.** `render` loads `pdfium.dll` (Windows) or `libpdfium.so` (Linux) from the folder the program is in, or from the folder that the environment variable `DANONPDF_PDFIUM_DIR` names when it is set and not empty. If the library is not there or cannot be loaded, the failure is `renderer_unavailable`, with exit code `1`. See [PDFium](#pdfium).
+
 ### What it does and does not do
 
 - It reads every input as given. No file is skipped for its name, and `merge` reads the same file twice when it is given twice.
-- It uses output paths exactly as given: it does not add `.pdf`.
+- It uses output paths exactly as given: it does not add `.pdf` or `.png`. `render` refuses an output that does not end in `.png` instead.
 - It never writes over an input, not even with `--force` (a hard link to one is not recognised).
 - It replaces an existing output only with `--force`.
 - `split` names its files after the input, numbered from 1: `report.pdf` gives `report-001.pdf`, `report-002.pdf`… inside `--output-dir`, which it creates if it is missing. It checks every name before it writes anything: if one is taken and `--force` was not given, it writes nothing. If a file cannot be saved halfway through, it stops and keeps the files already written; with `--json`, the error lists them under `written`.
@@ -112,6 +130,8 @@ docker compose run --rm build cargo run --release -p danonpdf-cli -- merge --out
 
   The reason is time. For 300 one-page files in the build container: about 5 seconds when waiting for the disk after each file, 1 to 2.5 seconds when waiting once at the end, and about 0.02 seconds without waiting.
 - **Password-protected files are refused.** A file that opens without a password is read like any other.
+- **An image has a largest size.** `render` draws a page at most 4096 pixels wide and 8192 pixels high, one page per run.
+- **A damaged file can be judged two ways.** `render` reads a file with PDFium; every other operation reads it with another library (lopdf). They agree on sound files, and can disagree on damaged ones. A file whose end is cut off is still counted by `info` and refused by `render`. A file whose catalog names no page tree is damaged for `info`, and a document without pages for `render`. So "it can be merged or split" and "it can be drawn" are two separate questions.
 
 ## Why local
 
@@ -133,7 +153,7 @@ docker compose run --rm build cargo test --workspace
 docker compose run --rm build bash scripts/build-windows.sh
 ```
 
-The last command cross-compiles both Windows programs and leaves them in `dist/`: `danonpdf.exe`, the desktop app, and `danonpdf-cli.exe`, the command-line tool. Next to them it puts `pdfium.dll` and, in `dist/licenses/pdfium/`, the licence texts that go with it (see [PDFium](#pdfium)). Keep the three files and that folder together. Run the programs on Windows: a window does not open from inside a container.
+The last command cross-compiles both Windows programs and leaves them in `dist/`: `danonpdf.exe`, the desktop app, and `danonpdf-cli.exe`, the command-line tool. Next to them it puts `pdfium.dll` and, in `dist/licenses/pdfium/`, the licence texts that go with it (see [PDFium](#pdfium)). Keep the three files and that folder together: `danonpdf-cli.exe render` looks for `pdfium.dll` in its own folder, and the DLL must not travel without its licences. Run the programs on Windows: a window does not open from inside a container.
 
 Downloaded crates and build output are kept in Docker volumes, not in the checkout. On Linux, build the image with your own user so the files the container writes stay yours:
 
@@ -149,13 +169,15 @@ docker compose down --volumes
 
 ## PDFium
 
-To draw a page, DanonPDF uses [PDFium](https://pdfium.googlesource.com/pdfium/), the PDF library of Chromium. It is the only part that is not Rust and not compiled here: it is a prebuilt library that the program loads when it runs, `pdfium.dll` on Windows and `libpdfium.so` on Linux. The core can draw a page with it and write the image as a PNG file; the window and the command-line tool do not use that yet.
+To draw a page, DanonPDF uses [PDFium](https://pdfium.googlesource.com/pdfium/), the PDF library of Chromium. It is the only part that is not Rust and not compiled here: it is a prebuilt library that a program loads when it draws a page, `pdfium.dll` on Windows and `libpdfium.so` on Linux. `danonpdf-cli render` draws a page with it and writes the image as a PNG file. The window does not draw pages yet, and the other commands of `danonpdf-cli` never load it: they work without the library.
 
 - **Where it comes from.** The [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) project, which builds PDFium and publishes one release per build.
 - **Which one.** The release tagged `chromium/8125`: `pdfium-win-x64.tgz` and `pdfium-linux-x64.tgz`.
 - **When it is downloaded.** Only while the build image is made (`docker compose build`), never by the programs. The `Dockerfile` pins the SHA-256 of both archives, and a download that does not match stops the build.
 - **Where it ends up.** In the image, under `/opt/pdfium/`. `scripts/build-windows.sh` copies the DLL to `dist/pdfium.dll`.
-- **Where the programs look for it.** In their own folder, and nowhere else: not in the current folder and not along `PATH`. The environment variable `DANONPDF_PDFIUM_DIR` names another folder; the build image sets it, so the tests find `libpdfium.so`.
+- **Where a program looks for it.** In its own folder, and nowhere else: not in the current folder and not along `PATH`. The environment variable `DANONPDF_PDFIUM_DIR` names another folder when it is set and not empty; a relative folder is taken from the current folder. The build image sets the variable, so the tests and `cargo run` find `libpdfium.so`.
+- **When it is not there.** `danonpdf-cli render` fails with the error code `renderer_unavailable` and names the file it looked for. Nothing is downloaded and nothing else is tried.
+- **Trust.** Loading a library runs its code inside the program. Point `DANONPDF_PDFIUM_DIR` only at a folder you trust as much as the program itself.
 
 **Licences.** PDFium is under the BSD 3-Clause and Apache 2.0 licences, and it has other libraries built into it (FreeType, ICU, libjpeg-turbo, OpenJPEG, zlib and more), each under its own permissive licence. Those licences ask for their text to go with every copy of the binary, so `dist/licenses/pdfium/` holds all of them as they come in the release: `licenses/pdfium.txt` for PDFium, one file for each library in it, and `LICENSE`, the MIT licence of the pdfium-binaries packaging. `VERSION` there says which build the DLL is. DanonPDF itself stays under GPL-3.0. The BSD 3-Clause and Apache 2.0 licences are both compatible with version 3 of the GPL (Apache 2.0 is not compatible with version 2).
 
@@ -184,7 +206,8 @@ It prints how many pages it wrote, or why it could not merge.
 | `crates/danonpdf-core/examples/merge.rs` | The command-line merge example above. |
 | `crates/danonpdf-core/src/pages.rs` | The page syntax (`1-3,7,10-`), shared by every front end. |
 | `crates/danonpdf-core/src/render.rs` | Draws a page as pixels and writes them as a PNG. `render/pdfium.rs` is the only file that knows PDFium. |
-| `crates/danonpdf-cli` | The command-line tool (`danonpdf-cli`): arguments in, a line or a JSON object out. |
+| `crates/danonpdf-core/tests/` | Tests of how the PDFium library is found and loaded. Each file is a process of its own, because a process loads PDFium once. |
+| `crates/danonpdf-cli` | The command-line tool (`danonpdf-cli`): arguments in, a line or a JSON object out. One file per command (`merge.rs`, `info.rs`, `extract.rs`, `split.rs`, `render.rs`). |
 | `crates/danonpdf-cli/tests/cli.rs` | Runs the real program and checks its output and exit codes. |
 | `crates/danonpdf-desktop` | The desktop app (`danonpdf`), built with [egui](https://github.com/emilk/egui). |
 | `crates/danonpdf-desktop/src/merge_list.rs` | The Merge view's state and rules, tested without a window. |

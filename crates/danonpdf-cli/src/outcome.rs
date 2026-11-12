@@ -2,18 +2,19 @@
 //! when it worked, a [`Failure`] when it did not.
 //!
 //! Each operation has its own module (`merge.rs`, `info.rs`, `extract.rs`,
-//! `split.rs`) with a `run` function that returns
+//! `split.rs`, `render.rs`) with a `run` function that returns
 //! `Result<Report, Failure>`. Nothing in those modules prints or ends the
 //! program: `output.rs` decides how to show either value. That split keeps
 //! the rules testable without starting a program and reading its output.
 //!
 //! What the operations share lives here: the names they go by, the shape
-//! of a failure, the one place where an error of the core gets its code,
-//! and the two rules about what may be written where.
+//! of a failure, the two places where an error of the core gets its code
+//! (one for each error type of the core), and the two rules about what may
+//! be written where.
 
 use std::path::{Path, PathBuf};
 
-use danonpdf_core::{PdfError, WhichInput, error_chain, name_is_taken, same_file};
+use danonpdf_core::{PdfError, RenderError, WhichInput, error_chain, name_is_taken, same_file};
 
 use crate::texts;
 
@@ -24,6 +25,7 @@ pub enum Operation {
     Info,
     Extract,
     Split,
+    Render,
 }
 
 impl Operation {
@@ -43,6 +45,7 @@ impl Operation {
             Self::Info => "info",
             Self::Extract => "extract",
             Self::Split => "split",
+            Self::Render => "render",
         }
     }
 }
@@ -84,6 +87,17 @@ pub enum Report {
         /// How many pages they hold together: every page of the input.
         pages: usize,
     },
+    Render {
+        /// Where the image was written.
+        output: PathBuf,
+        /// The page that was drawn, counted from 1.
+        page: usize,
+        /// The size of the image that was written, in pixels. It is read
+        /// from the image, not from the command line: a very tall page
+        /// comes out narrower than the width that was asked for.
+        width: u32,
+        height: u32,
+    },
 }
 
 /// Why an operation did not happen, or did not finish.
@@ -121,7 +135,8 @@ pub enum ErrorCode {
     NoInputs,
     /// An input could not be read, or is not a PDF.
     ReadFailed,
-    /// An input needs a password.
+    /// An input needs a password or, when drawing, is protected in a way
+    /// that cannot be opened at all.
     Encrypted,
     /// An input opened, but its structure is damaged.
     BrokenPdf,
@@ -129,6 +144,13 @@ pub enum ErrorCode {
     PageOutOfRange,
     /// An output file, or the folder for it, could not be written.
     SaveFailed,
+    /// The library that draws pages (PDFium) is missing or cannot be
+    /// loaded. Nothing is wrong with the input, and only `render` needs
+    /// that library.
+    RendererUnavailable,
+    /// The library that draws pages failed, without a reason that has a
+    /// code of its own.
+    RenderFailed,
 }
 
 impl ErrorCode {
@@ -148,6 +170,8 @@ impl ErrorCode {
             Self::BrokenPdf => "broken_pdf",
             Self::PageOutOfRange => "page_out_of_range",
             Self::SaveFailed => "save_failed",
+            Self::RendererUnavailable => "renderer_unavailable",
+            Self::RenderFailed => "render_failed",
         }
     }
 }
@@ -255,6 +279,72 @@ pub fn failure_from<P: AsRef<Path>>(error: &PdfError, inputs: &[P]) -> Failure {
     }
 }
 
+/// Turns an error of the core's `render` module into the tool's failure,
+/// as [`failure_from`] does for every other error of the core.
+///
+/// `input` is the file that was to be drawn. Drawing reads one file, so an
+/// error that is about a file and carries no path of its own is about that
+/// one.
+///
+/// A code that the other operations already use is reused wherever a
+/// caller would do the same about the failure, so a script that handles
+/// `read_failed` for `info` handles it for `render` with no new case. Two
+/// codes are new, for the two failures that only drawing has.
+pub fn render_failure_from(error: &RenderError, input: &Path) -> Failure {
+    let input = || Some(input.to_path_buf());
+    // No `_ =>` arm, for the reason given in `failure_from`: a variant
+    // added to `RenderError` must be given its code here before this crate
+    // builds again.
+    let (code, path) = match error {
+        // The next four are the ways for PDFium not to be there. A caller
+        // does the same about all of them (put the library where the tool
+        // looks for it, or stop asking for images), and none says anything
+        // about the input. `path` is the library file that was looked for.
+        //
+        // The first one has no file to name: the program could not tell
+        // which folder it runs from.
+        RenderError::LibraryFolderUnknown { .. } => (ErrorCode::RendererUnavailable, None),
+        RenderError::LibraryMissing { path } | RenderError::LibraryFailed { path, .. } => {
+            (ErrorCode::RendererUnavailable, Some(path.clone()))
+        }
+        // Not reached by this tool: it loads the library once per run. If
+        // it ever is, the file that could not be used is the one asked for.
+        RenderError::LibraryAlreadyLoaded { asked, .. } => {
+            (ErrorCode::RendererUnavailable, Some(asked.clone()))
+        }
+        RenderError::Read { path, .. } => (ErrorCode::ReadFailed, Some(path.clone())),
+        // "Read, and not a PDF" is what `read_failed` already means for
+        // the other operations: their `PdfError::Read` covers a file that
+        // cannot be opened and one that is not a PDF alike, and the core
+        // words both errors the same.
+        RenderError::NotPdf { path } => (ErrorCode::ReadFailed, Some(path.clone())),
+        RenderError::Encrypted => (ErrorCode::Encrypted, input()),
+        // Protected in a way that PDFium cannot open, password or not.
+        // `encrypted` and not `broken_pdf`: the file is not damaged, and
+        // what a caller can do is what it does about a password it does
+        // not have, which is to find a copy without the protection. The
+        // other operations already report such a file as `encrypted`: for
+        // them, every protected file that did not open is one.
+        RenderError::UnsupportedProtection => (ErrorCode::Encrypted, input()),
+        RenderError::Broken { .. } => (ErrorCode::BrokenPdf, input()),
+        // About the page that was asked for, not about a file: no path.
+        RenderError::PageOutOfRange { .. } => (ErrorCode::PageOutOfRange, None),
+        // Not reached by this tool: the command line refuses such a width
+        // first, as a usage error. If it ever is, it is a page that was
+        // not drawn, told in the core's own sentence, and about no file.
+        RenderError::WidthOutOfRange { .. } => (ErrorCode::RenderFailed, None),
+        // PDFium gave up on this file without saying why.
+        RenderError::Engine { .. } => (ErrorCode::RenderFailed, input()),
+        RenderError::Save { path, .. } => (ErrorCode::SaveFailed, Some(path.clone())),
+    };
+    Failure {
+        code,
+        message: error_chain(error),
+        path,
+        written: Vec::new(),
+    }
+}
+
 /// The path of the input that `which` speaks of. `None` when the list has
 /// no such input.
 ///
@@ -352,6 +442,149 @@ mod tests {
     }
 
     #[test]
+    fn every_render_error_has_a_code_and_names_its_file() {
+        // One case per variant of `RenderError`, as above for `PdfError`:
+        // the `match` in `render_failure_from` has no `_` arm either.
+        let denied = || io::Error::new(io::ErrorKind::PermissionDenied, "access denied");
+        let library = "app/pdfium.dll";
+        let cases: [(RenderError, ErrorCode, Option<&str>); 13] = [
+            // The library is not there, in each of its four ways. The
+            // path is that of the library, never that of the input.
+            (
+                RenderError::LibraryFolderUnknown { source: denied() },
+                ErrorCode::RendererUnavailable,
+                None,
+            ),
+            (
+                RenderError::LibraryMissing {
+                    path: PathBuf::from(library),
+                },
+                ErrorCode::RendererUnavailable,
+                Some(library),
+            ),
+            (
+                RenderError::LibraryFailed {
+                    path: PathBuf::from(library),
+                    source: "not a valid library".into(),
+                },
+                ErrorCode::RendererUnavailable,
+                Some(library),
+            ),
+            (
+                RenderError::LibraryAlreadyLoaded {
+                    loaded: PathBuf::from("other/pdfium.dll"),
+                    asked: PathBuf::from(library),
+                },
+                ErrorCode::RendererUnavailable,
+                Some(library),
+            ),
+            // The input, with the codes the other operations give it.
+            (
+                RenderError::Read {
+                    path: PathBuf::from("gone.pdf"),
+                    source: denied(),
+                },
+                ErrorCode::ReadFailed,
+                Some("gone.pdf"),
+            ),
+            (
+                RenderError::NotPdf {
+                    path: PathBuf::from("notes.pdf"),
+                },
+                ErrorCode::ReadFailed,
+                Some("notes.pdf"),
+            ),
+            (
+                RenderError::Encrypted,
+                ErrorCode::Encrypted,
+                Some("report.pdf"),
+            ),
+            (
+                RenderError::UnsupportedProtection,
+                ErrorCode::Encrypted,
+                Some("report.pdf"),
+            ),
+            (
+                RenderError::Broken {
+                    reason: "a page cannot be read",
+                },
+                ErrorCode::BrokenPdf,
+                Some("report.pdf"),
+            ),
+            // What was asked for, not a file: no path.
+            (
+                RenderError::PageOutOfRange { page: 9, pages: 5 },
+                ErrorCode::PageOutOfRange,
+                None,
+            ),
+            (
+                RenderError::WidthOutOfRange {
+                    width: 0,
+                    maximum: 4096,
+                },
+                ErrorCode::RenderFailed,
+                None,
+            ),
+            (
+                RenderError::Engine {
+                    doing: "drawing the page",
+                    detail: "Unknown".to_owned(),
+                },
+                ErrorCode::RenderFailed,
+                Some("report.pdf"),
+            ),
+            (
+                RenderError::Save {
+                    path: PathBuf::from("page.png"),
+                    source: denied(),
+                },
+                ErrorCode::SaveFailed,
+                Some("page.png"),
+            ),
+        ];
+
+        for (error, code, path) in cases {
+            let failure = render_failure_from(&error, Path::new("report.pdf"));
+
+            assert_eq!(failure.code, code, "{error:?}");
+            assert_eq!(failure.path.as_deref(), path.map(Path::new), "{error:?}");
+            assert_eq!(failure.message, error_chain(&error), "{error:?}");
+            assert_eq!(failure.written, Vec::<PathBuf>::new(), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn a_render_error_reads_as_the_other_operations_would_put_it() {
+        // The same code, the same sentence and the same path for the same
+        // trouble, whichever command met it: a caller needs no case of its
+        // own for `render`.
+        let input = Path::new("report.pdf");
+
+        let drawn = render_failure_from(&RenderError::Encrypted, input);
+        let counted = failure_from(
+            &PdfError::Encrypted {
+                input: WhichInput::Only,
+            },
+            &[input],
+        );
+        assert_eq!(drawn, counted);
+
+        let drawn = render_failure_from(&RenderError::PageOutOfRange { page: 9, pages: 5 }, input);
+        let extracted = failure_from(&PdfError::PageOutOfRange { page: 9, pages: 5 }, &[input]);
+        assert_eq!(drawn, extracted);
+
+        // The whole chain of causes, as for every other failure.
+        let failed = RenderError::LibraryFailed {
+            path: PathBuf::from("app/pdfium.dll"),
+            source: "not a valid library".into(),
+        };
+        assert_eq!(
+            render_failure_from(&failed, input).message,
+            "cannot load the PDFium library app/pdfium.dll: not a valid library"
+        );
+    }
+
+    #[test]
     fn an_input_number_outside_the_list_names_no_file() {
         // The core counts inputs from 1, so 0 is never a real input, and 3
         // is past the end of a list of two. Neither may panic or name a
@@ -414,6 +647,8 @@ mod tests {
             (ErrorCode::BrokenPdf, "broken_pdf"),
             (ErrorCode::PageOutOfRange, "page_out_of_range"),
             (ErrorCode::SaveFailed, "save_failed"),
+            (ErrorCode::RendererUnavailable, "renderer_unavailable"),
+            (ErrorCode::RenderFailed, "render_failed"),
         ];
         for (code, text) in codes {
             assert_eq!(code.as_str(), text);
@@ -429,6 +664,7 @@ mod tests {
             (Operation::Info, "info"),
             (Operation::Extract, "extract"),
             (Operation::Split, "split"),
+            (Operation::Render, "render"),
         ];
         for (operation, name) in names {
             assert_eq!(operation.name(), name);

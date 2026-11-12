@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Builds the two Windows programs from Linux and copies them to dist/,
-# with the PDFium library they load when they run:
+# with the PDFium library that drawing a page needs:
 #   dist/danonpdf.exe      the desktop app (a GUI program: no console window)
 #   dist/danonpdf-cli.exe  the command-line tool (a console program)
 #   dist/pdfium.dll        PDFium, prebuilt (not compiled here: see Dockerfile)
 #   dist/licenses/pdfium/  the licence texts that must travel with that DLL
+# `danonpdf-cli.exe render` loads pdfium.dll from the folder it is in, which
+# is why the DLL sits next to the programs. Nothing else loads it: the other
+# commands work without it, and the desktop app does not draw pages.
 # Meant to run inside the build container:
 #   docker compose run --rm build bash scripts/build-windows.sh
 #

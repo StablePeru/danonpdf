@@ -14,8 +14,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # PDFium, the library that draws PDF pages. DanonPDF does not compile it
-# (that takes Chromium's build system and a long time): it loads a prebuilt
-# library when it runs, libpdfium.so on Linux and pdfium.dll on Windows.
+# (that takes Chromium's build system and a long time): the core loads a
+# prebuilt library at the moment a page is drawn, libpdfium.so on Linux and
+# pdfium.dll on Windows. What draws pages is `danonpdf-cli render` and the
+# tests; the other commands and the desktop app never load the library.
 # The binaries come from https://github.com/bblanchon/pdfium-binaries, one
 # release per PDFium build. The build number must be the one that the
 # pdfium-render crate is told to bind to (its `pdfium_8125` feature in
@@ -118,11 +120,13 @@ RUN if ! getent group "${GID}" > /dev/null; then \
 ENV CARGO_HOME=/home/builder/.cargo \
     CARGO_TARGET_DIR=/home/builder/target
 
-# The folder that holds the PDFium library for this platform. DanonPDF looks
-# next to its own executable by default; this variable is the documented way
-# to point it somewhere else. In this image the executable is a test binary
-# deep in the target folder, so tests and `cargo run` need the variable to
-# find the library unpacked above.
+# The folder that holds the PDFium library for this platform. A program
+# that draws a page looks for the library next to its own executable, unless
+# this variable names another folder: the rule is `default_library_folder`
+# in the core, and the README ("PDFium"), AGENTS.md and `danonpdf-cli --help`
+# document it. In this image the executable is a test binary, or a program
+# started by `cargo run`, deep in the target folder, so both need the
+# variable to find the library unpacked above.
 ENV DANONPDF_PDFIUM_DIR=/opt/pdfium/linux/lib
 
 USER builder

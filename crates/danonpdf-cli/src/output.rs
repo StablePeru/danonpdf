@@ -126,6 +126,12 @@ fn human_line(report: &Report) -> String {
         Report::Info { input, pages } => texts::page_count(input, *pages),
         Report::Extract { output, pages } => texts::extracted(*pages, output),
         Report::Split { outputs, pages } => texts::split(*pages, outputs),
+        Report::Render {
+            output,
+            page,
+            width,
+            height,
+        } => texts::rendered(*page, *width, *height, output),
     }
 }
 
@@ -183,6 +189,15 @@ enum DetailsJson<'a> {
         files: usize,
         pages: usize,
     },
+    Render {
+        output: Cow<'a, str>,
+        /// The page that was drawn, counted from 1. Singular, where the
+        /// other commands have `pages`: it is a page number, not a count.
+        page: usize,
+        /// The size of the image that was written, in pixels.
+        width: u32,
+        height: u32,
+    },
 }
 
 impl<'a> DetailsJson<'a> {
@@ -212,6 +227,17 @@ impl<'a> DetailsJson<'a> {
                 outputs: all_lossy(outputs),
                 files: outputs.len(),
                 pages: *pages,
+            },
+            Report::Render {
+                output,
+                page,
+                width,
+                height,
+            } => Self::Render {
+                output: lossy(output),
+                page: *page,
+                width: *width,
+                height: *height,
             },
         }
     }
@@ -354,6 +380,15 @@ mod tests {
                 },
                 "Split 30 pages into 2 files: dir/x-001.pdf to dir/x-002.pdf",
             ),
+            (
+                Report::Render {
+                    output: PathBuf::from("page.png"),
+                    page: 3,
+                    width: 1024,
+                    height: 1449,
+                },
+                "Rendered page 3 (1024 by 1449 pixels) into page.png",
+            ),
         ];
         for (report, line) in cases {
             // The operation only matters for JSON; any one will do here.
@@ -445,6 +480,24 @@ mod tests {
     }
 
     #[test]
+    fn json_render_has_the_documented_shape() {
+        let report = Report::Render {
+            output: PathBuf::from("page.png"),
+            page: 3,
+            width: 1024,
+            height: 1449,
+        };
+
+        assert_eq!(
+            json_success(Operation::Render, report),
+            concat!(
+                r#"{"ok":true,"operation":"render","#,
+                r#""output":"page.png","page":3,"width":1024,"height":1449}"#
+            )
+        );
+    }
+
+    #[test]
     fn json_failure_goes_to_stdout_and_leaves_stderr_empty() {
         let expected = concat!(
             r#"{"ok":false,"operation":"merge","error":{"code":"output_exists","#,
@@ -462,7 +515,12 @@ mod tests {
 
     #[test]
     fn json_failure_names_the_operation_that_failed() {
-        for operation in [Operation::Info, Operation::Extract, Operation::Split] {
+        for operation in [
+            Operation::Info,
+            Operation::Extract,
+            Operation::Split,
+            Operation::Render,
+        ] {
             let line = render(operation, &failure(None), Format::Json)
                 .stdout
                 .unwrap();

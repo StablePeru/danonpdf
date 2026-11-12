@@ -7,8 +7,8 @@
 //! It is a thin layer, like the window. Each step has its own module:
 //!
 //! 1. `cli.rs` says which commands and arguments exist; clap parses them.
-//! 2. `merge.rs`, `info.rs`, `extract.rs` and `split.rs` each run one
-//!    operation: they apply the tool's rules and call the core.
+//! 2. `merge.rs`, `info.rs`, `extract.rs`, `split.rs` and `render.rs` each
+//!    run one operation: they apply the tool's rules and call the core.
 //!    `outcome.rs` holds what they share: the report, the failure and the
 //!    error codes.
 //! 3. `output.rs` turns the outcome into text and an exit code.
@@ -23,6 +23,7 @@ mod info;
 mod merge;
 mod outcome;
 mod output;
+mod render;
 mod split;
 mod texts;
 
@@ -58,6 +59,10 @@ fn main() -> ExitCode {
         ),
         Command::Split(args) => (
             split::run(&args.input, args.every, &args.output_dir, args.force),
+            args.json,
+        ),
+        Command::Render(args) => (
+            render::run(&args.input, args.page, args.width, &args.output, args.force),
             args.json,
         ),
     };

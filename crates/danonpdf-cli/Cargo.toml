@@ -23,3 +23,7 @@ serde_json.workspace = true
 # Only the tests use lopdf directly: they build small PDFs to merge and read
 # the merged file back to count its pages.
 lopdf.workspace = true
+# Only the tests use png directly: they read back the image that `render`
+# wrote, to compare its real size with the one in the report. The program
+# itself writes PNG through the core.
+png.workspace = true

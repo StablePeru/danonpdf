@@ -11,7 +11,8 @@
 //! time in the `CARGO_BIN_EXE_<name>` environment variable.
 
 use std::ffi::OsStr;
-use std::fs;
+use std::fs::{self, File};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -23,8 +24,14 @@ use serde_json::{Value, json};
 /// `&[&OsStr]` and not `&[&str]`: a path is not always valid text, and
 /// `OsStr` is what the system really passes to a program.
 fn cli(args: &[&OsStr]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_danonpdf-cli"))
-        .args(args)
+    run(Command::new(env!("CARGO_BIN_EXE_danonpdf-cli")).args(args))
+}
+
+/// Starts `program` and waits for it to end. `cli` is the usual way in;
+/// the tests that change the environment of the program build their own
+/// `Command` and come here.
+fn run(program: &mut Command) -> Output {
+    program
         // The tool must never wait for input. With nothing to read, a
         // version that asked a question would fail here instead of hanging
         // the test run.
@@ -73,6 +80,52 @@ fn split(flags: &[&str], folder: &Path, input: &Path) -> Output {
     args.push(folder.as_os_str());
     args.push(input.as_os_str());
     cli(&args)
+}
+
+/// The environment variable that names the folder of the PDFium library.
+/// Spelled out here, not taken from the core: the name is documented, so a
+/// change to it must fail a test.
+const PDFIUM_DIR: &str = "DANONPDF_PDFIUM_DIR";
+
+/// The arguments of `danonpdf-cli render <flags> --page <page> --output
+/// <output> <input>`. To set the width, put `"--width", "N"` among the
+/// flags.
+fn render_args<'a>(
+    flags: &'a [&str],
+    page: &'a str,
+    output: &'a Path,
+    input: &'a Path,
+) -> Vec<&'a OsStr> {
+    let mut args: Vec<&OsStr> = vec![OsStr::new("render")];
+    args.extend(flags.iter().map(OsStr::new));
+    args.push(OsStr::new("--page"));
+    args.push(OsStr::new(page));
+    args.push(OsStr::new("--output"));
+    args.push(output.as_os_str());
+    args.push(input.as_os_str());
+    args
+}
+
+/// Runs `danonpdf-cli render` with the PDFium library of the build image:
+/// the test run has `DANONPDF_PDFIUM_DIR` set, and the program inherits
+/// it.
+fn render(flags: &[&str], page: &str, output: &Path, input: &Path) -> Output {
+    cli(&render_args(flags, page, output, input))
+}
+
+/// Runs `danonpdf-cli render` told to look for the PDFium library in
+/// `library_folder`. Every run is a process of its own, so each one can be
+/// given another folder: inside one process the library loads once.
+fn render_with_library(
+    library_folder: &Path,
+    flags: &[&str],
+    page: &str,
+    output: &Path,
+    input: &Path,
+) -> Output {
+    run(Command::new(env!("CARGO_BIN_EXE_danonpdf-cli"))
+        .args(render_args(flags, page, output, input))
+        .env(PDFIUM_DIR, library_folder))
 }
 
 /// What the program wrote to stdout, as text.
@@ -124,8 +177,13 @@ impl ScratchDir {
 
     /// Saves a PDF with `page_count` pages into this folder as `name`.
     fn pdf(&self, name: &str, page_count: i64) -> PathBuf {
+        self.save(name, with_pages(page_count))
+    }
+
+    /// Saves `document` into this folder as `name` and returns its path.
+    fn save(&self, name: &str, mut document: Document) -> PathBuf {
         let path = self.file(name);
-        with_pages(page_count).save(&path).unwrap();
+        document.save(&path).unwrap();
         path
     }
 
@@ -185,6 +243,44 @@ fn encrypted(mut document: Document, user_password: &str) -> Document {
     let state = EncryptionState::try_from(version).unwrap();
     document.encrypt(&state).unwrap();
     document
+}
+
+/// A document with one empty page, `width` by `height` points.
+fn with_one_page(width: i64, height: i64) -> Document {
+    let mut document = Document::with_version("1.5");
+    let pages_id = document.new_object_id();
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), width.into(), height.into()],
+    });
+    let pages = dictionary! {
+        "Type" => "Pages",
+        "Kids" => vec![Object::Reference(page_id)],
+        "Count" => 1,
+    };
+    document.objects.insert(pages_id, Object::Dictionary(pages));
+    let catalog_id = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    document.trailer.set("Root", catalog_id);
+    document
+}
+
+/// Reads the PNG file at `path`: its width, its height and its pixels, four
+/// bytes each (red, green, blue, alpha). Fails the test unless the file is
+/// a PNG with 8 bits per channel and alpha, which is what `render` writes.
+fn decode_png(path: &Path) -> (u32, u32, Vec<u8>) {
+    let bytes = fs::read(path).unwrap();
+    // Every PNG file starts with these eight bytes.
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "not a PNG file");
+
+    let decoder = png::Decoder::new(BufReader::new(File::open(path).unwrap()));
+    let mut reader = decoder.read_info().unwrap();
+    let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+    let frame = reader.next_frame(&mut pixels).unwrap();
+    assert_eq!(frame.color_type, png::ColorType::Rgba);
+    assert_eq!(frame.bit_depth, png::BitDepth::Eight);
+    pixels.truncate(frame.buffer_size());
+    (frame.width, frame.height, pixels)
 }
 
 /// How many pages the PDF at `path` has.
@@ -530,7 +626,7 @@ fn version_prints_the_name_and_the_version() {
 #[test]
 fn help_teaches_the_whole_contract() {
     // Every way to ask; an agent that has never seen the tool may try any.
-    let asks: [&[&str]; 9] = [
+    let asks: [&[&str]; 11] = [
         &["--help"],
         &["help", "merge"],
         &["merge", "--help"],
@@ -540,6 +636,8 @@ fn help_teaches_the_whole_contract() {
         &["extract", "--help"],
         &["help", "split"],
         &["split", "--help"],
+        &["help", "render"],
+        &["render", "--help"],
     ];
     for ask in asks {
         let args: Vec<&OsStr> = ask.iter().map(OsStr::new).collect();
@@ -554,6 +652,19 @@ fn help_teaches_the_whole_contract() {
             "danonpdf-cli info --json report.pdf",
             "danonpdf-cli extract --json --pages 1-3,7,10- --output part.pdf report.pdf",
             "danonpdf-cli split --json --every 10 --output-dir parts report.pdf",
+            "danonpdf-cli render --json --page 1 --output page.png report.pdf",
+            // What render draws: the limits of the image, the name its
+            // output must have, and that the report holds the real size.
+            "from 1 to 4096",
+            "the image is 1024 pixels wide",
+            "at most 8192 pixels high",
+            "--output must end in .png",
+            r#"read "width" and "height" there"#,
+            // Where render looks for the PDFium library, and who needs it.
+            "pdfium.dll on Windows",
+            "libpdfium.so on Linux",
+            "DANONPDF_PDFIUM_DIR",
+            "merge, info, extract and split do not need it",
             // The page syntax, and which mistakes end with which exit code.
             "A-B  pages A to B, both included; A must not be above B",
             "A-   page A and every page after it",
@@ -572,6 +683,7 @@ fn help_teaches_the_whole_contract() {
             r#"{"ok":true,"operation":"info","input":"report.pdf","pages":12}"#,
             r#"{"ok":true,"operation":"extract","output":"part.pdf","pages":7}"#,
             r#"{"ok":true,"operation":"split","outputs":["parts/report-001.pdf","parts/report-002.pdf"],"files":2,"pages":12}"#,
+            r#"{"ok":true,"operation":"render","output":"page.png","page":1,"width":1024,"height":1449}"#,
             r#"{"ok":false,"operation":"merge","error":{"code":"output_exists","#,
             // The extra key of a split that stopped midway.
             r#"adds "written" to"#,
@@ -584,6 +696,8 @@ fn help_teaches_the_whole_contract() {
             "broken_pdf",
             "page_out_of_range",
             "save_failed",
+            "renderer_unavailable",
+            "render_failed",
         ] {
             assert!(help.contains(expected), "{ask:?} lacks {expected:?}");
         }
@@ -614,6 +728,15 @@ fn the_examples_in_the_help_tell_the_truth() {
         entries_of(&scratch.file("parts")),
         ["report-001.pdf", "report-002.pdf"]
     );
+
+    // The help also shows what `render --page 1` prints, and says that an
+    // A4 page drawn at the default width is 1024 by 1449 pixels.
+    let a4 = scratch.save("a4.pdf", with_one_page(595, 842));
+    let page = scratch.file("page.png");
+    let rendered = json_report(&render(&["--json"], "1", &page, &a4));
+    assert_eq!(rendered["page"], 1);
+    assert_eq!(rendered["width"], 1024);
+    assert_eq!(rendered["height"], 1449);
 }
 
 // info
@@ -1111,4 +1234,512 @@ fn the_new_commands_refuse_an_incomplete_command_line() {
         assert!(!stderr(&result).is_empty(), "stderr should explain");
     }
     assert_eq!(scratch.entries(), ["doc.pdf"]);
+}
+
+// render
+
+#[test]
+fn render_with_json_prints_exactly_one_object_and_writes_a_png() {
+    let scratch = ScratchDir::new("render-json");
+    // Page n of this file is 500 + n points wide and 842 points high.
+    let input = scratch.pdf("in.pdf", 3);
+    let before = fs::read(&input).unwrap();
+    let out = scratch.file("page.png");
+
+    let result = render(&["--json", "--width", "200"], "2", &out, &input);
+
+    assert_eq!(result.status.code(), Some(0), "{}", stdout(&result));
+    // Page 2 is 502 by 842 points: 200 * 842 / 502 = 335.4, rounded to 335.
+    assert_eq!(
+        json_report(&result),
+        json!({
+            "ok": true,
+            "operation": "render",
+            "output": text(&out),
+            "page": 2,
+            "width": 200,
+            "height": 335,
+        })
+    );
+    // The order of the keys, which a parsed value has lost.
+    let line = stdout(&result);
+    let keys = [
+        r#""ok":"#,
+        r#""operation":"#,
+        r#""output":"#,
+        r#""page":"#,
+        r#""width":"#,
+        r#""height":"#,
+    ];
+    let places: Vec<usize> = keys.iter().map(|key| line.find(key).unwrap()).collect();
+    assert!(places.is_sorted(), "unexpected order: {line}");
+
+    // The file is a PNG of the size the report gives. The page is empty,
+    // so every pixel is paper: white, and fully opaque.
+    let (width, height, pixels) = decode_png(&out);
+    assert_eq!((width, height), (200, 335));
+    // `as_chunks` looks at the same bytes four at a time, as `[u8; 4]`
+    // values, and hands back whatever is left over at the end.
+    let (pixels, rest) = pixels.as_chunks::<4>();
+    assert!(rest.is_empty(), "the image does not end on a whole pixel");
+    assert_eq!(pixels.len(), 200 * 335);
+    assert!(
+        pixels.iter().all(|pixel| *pixel == [255; 4]),
+        "an empty page should be all white and opaque"
+    );
+    // The input is only read, and nothing else was written.
+    assert_eq!(fs::read(&input).unwrap(), before, "the input was changed");
+    assert_eq!(scratch.entries(), ["in.pdf", "page.png"]);
+}
+
+#[test]
+fn render_prints_one_human_line_and_draws_1024_pixels_wide_by_default() {
+    let scratch = ScratchDir::new("render-human");
+    let input = scratch.save("a4.pdf", with_one_page(595, 842));
+    let out = scratch.file("page.png");
+
+    let result = render(&[], "1", &out, &input);
+
+    assert_eq!(result.status.code(), Some(0), "{}", stderr(&result));
+    // An A4 page: 1024 * 842 / 595 = 1449.1, rounded to 1449.
+    assert_eq!(
+        stdout(&result),
+        format!(
+            "Rendered page 1 (1024 by 1449 pixels) into {}\n",
+            out.display()
+        )
+    );
+    assert_eq!(stderr(&result), "");
+    let (width, height, _) = decode_png(&out);
+    assert_eq!((width, height), (1024, 1449));
+}
+
+#[test]
+fn render_reports_the_size_it_drew_when_a_page_is_too_tall() {
+    let scratch = ScratchDir::new("render-tall");
+    // 10 by 2000 points: 100 pixels wide would mean 20000 pixels high.
+    let input = scratch.save("tall.pdf", with_one_page(10, 2000));
+    let out = scratch.file("tall.png");
+
+    let result = render(&["--json", "--width", "100"], "1", &out, &input);
+
+    assert_eq!(result.status.code(), Some(0), "{}", stdout(&result));
+    // The whole page is drawn smaller, to fit the tallest image there is:
+    // the report gives that size, not the width that was asked for.
+    let report = json_report(&result);
+    assert_eq!(report["width"], 41);
+    assert_eq!(report["height"], danonpdf_core::MAX_RENDER_HEIGHT);
+    let (width, height, _) = decode_png(&out);
+    assert_eq!((width, height), (41, danonpdf_core::MAX_RENDER_HEIGHT));
+}
+
+#[test]
+fn render_accepts_the_widest_image_and_png_in_any_letter_case() {
+    let scratch = ScratchDir::new("render-widest");
+    let input = scratch.save("wide.pdf", with_one_page(400, 100));
+    let out = scratch.file("PAGE.PNG");
+    let widest = danonpdf_core::MAX_RENDER_WIDTH.to_string();
+
+    let result = render(&["--json", "--width", widest.as_str()], "1", &out, &input);
+
+    assert_eq!(result.status.code(), Some(0), "{}", stderr(&result));
+    let report = json_report(&result);
+    assert_eq!(report["width"], danonpdf_core::MAX_RENDER_WIDTH);
+    assert_eq!(report["height"], danonpdf_core::MAX_RENDER_WIDTH / 4);
+    assert_eq!(scratch.entries(), ["PAGE.PNG", "wide.pdf"]);
+}
+
+#[test]
+fn render_usage_errors_exit_with_2_also_with_json() {
+    let scratch = ScratchDir::new("render-usage");
+    let input = scratch.pdf("in.pdf", 2);
+    let input = text(&input);
+    let (png, jpg, bare) = (
+        scratch.file("page.png"),
+        scratch.file("page.jpg"),
+        scratch.file("page"),
+    );
+    let (png, jpg, bare) = (text(&png), text(&jpg), text(&bare));
+    let too_wide = (danonpdf_core::MAX_RENDER_WIDTH + 1).to_string();
+
+    // What follows `render` on each command line, and a few words that its
+    // message must hold: the argument that is wrong or missing.
+    let lines: [(&[&str], &str); 11] = [
+        (&["--page", "0", "--output", png, input], "--page <N>"),
+        (&["--page", "abc", "--output", png, input], "--page <N>"),
+        (&["--page", "1.5", "--output", png, input], "--page <N>"),
+        (
+            &["--page", "1", "--width", "0", "--output", png, input],
+            "--width <PX>",
+        ),
+        (
+            &[
+                "--page",
+                "1",
+                "--width",
+                too_wide.as_str(),
+                "--output",
+                png,
+                input,
+            ],
+            "--width <PX>",
+        ),
+        (
+            &["--page", "1", "--width", "wide", "--output", png, input],
+            "--width <PX>",
+        ),
+        (&["--page", "1", "--output", jpg, input], "must end in .png"),
+        (
+            &["--page", "1", "--output", bare, input],
+            "must end in .png",
+        ),
+        (&["--output", png, input], "--page <N>"),
+        (&["--page", "1", input], "--output <FILE>"),
+        (&["--page", "1", "--output", png], "<INPUT>"),
+    ];
+    for (line, expected) in lines {
+        // With `--json` too: the parser stops before the tool knows which
+        // format was wanted, so the answer is plain text on stderr.
+        for json in [false, true] {
+            let mut args: Vec<&OsStr> = vec![OsStr::new("render")];
+            if json {
+                args.push(OsStr::new("--json"));
+            }
+            args.extend(line.iter().map(OsStr::new));
+
+            let result = cli(&args);
+
+            assert_eq!(result.status.code(), Some(2), "{line:?} json: {json}");
+            assert_eq!(stdout(&result), "", "{line:?} json: {json}");
+            let message = stderr(&result);
+            assert!(
+                message.starts_with("error: ") && message.contains(expected),
+                "{line:?} json: {json} gave: {message}"
+            );
+        }
+    }
+    assert_eq!(scratch.entries(), ["in.pdf"]);
+}
+
+#[test]
+fn render_of_a_page_past_the_end_is_page_out_of_range_and_writes_nothing() {
+    let scratch = ScratchDir::new("render-past-end");
+    let input = scratch.pdf("in.pdf", 3);
+    let out = scratch.file("page.png");
+
+    let result = render(&["--json"], "4", &out, &input);
+
+    let error = failure_of(&result, "render", "page_out_of_range");
+    // The failure is about the page asked for, not about a file.
+    assert_eq!(error.get("path"), None);
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.contains("page 4") && message.contains("3 pages"),
+        "unexpected message: {message}"
+    );
+    assert_eq!(scratch.entries(), ["in.pdf"]);
+}
+
+#[test]
+fn render_replaces_an_existing_output_only_with_force() {
+    let scratch = ScratchDir::new("render-output-exists");
+    let input = scratch.pdf("in.pdf", 1);
+    let out = scratch.file("page.png");
+    fs::write(&out, b"someone else's file").unwrap();
+
+    let refused = render(&["--json"], "1", &out, &input);
+
+    let error = failure_of(&refused, "render", "output_exists");
+    assert_eq!(error["path"], text(&out));
+    assert_eq!(fs::read(&out).unwrap(), b"someone else's file");
+
+    let forced = render(&["--json", "--force", "--width", "50"], "1", &out, &input);
+
+    assert_eq!(forced.status.code(), Some(0), "{}", stdout(&forced));
+    let (width, _, _) = decode_png(&out);
+    assert_eq!(width, 50);
+}
+
+#[test]
+fn render_never_writes_over_its_input() {
+    // An input is read whatever its name, so a PDF may be called
+    // `scan.png`. Only then can the output of a render, which must end in
+    // `.png`, be its own input.
+    let scratch = ScratchDir::new("render-output-is-input");
+    let input = scratch.pdf("scan.png", 1);
+    let before = fs::read(&input).unwrap();
+    // The input itself, spelled differently.
+    let respelled = scratch.0.join(".").join("scan.png");
+
+    for flags in [&["--json"][..], &["--json", "--force"][..]] {
+        let result = render(flags, "1", &respelled, &input);
+
+        let error = failure_of(&result, "render", "output_is_input");
+        assert_eq!(error["path"], text(&respelled));
+        assert_eq!(fs::read(&input).unwrap(), before, "the input was changed");
+        assert_eq!(scratch.entries(), ["scan.png"]);
+    }
+}
+
+#[test]
+fn render_refuses_a_file_that_needs_a_password_and_draws_one_that_does_not() {
+    let scratch = ScratchDir::new("render-encrypted");
+    let locked = scratch.save("locked.pdf", encrypted(with_pages(1), "secret"));
+    // Encrypted too, with the empty password: it opens for anyone.
+    let open = scratch.save("open.pdf", encrypted(with_pages(1), ""));
+    let out = scratch.file("page.png");
+
+    let result = render(&["--json"], "1", &out, &locked);
+
+    let error = failure_of(&result, "render", "encrypted");
+    assert_eq!(error["path"], text(&locked));
+    assert_eq!(error["message"], THE_FILE_IS_ENCRYPTED);
+    assert!(!out.exists(), "nothing should be written");
+
+    let result = render(&["--json", "--width", "100"], "1", &out, &open);
+
+    assert_eq!(result.status.code(), Some(0), "{}", stdout(&result));
+    let (width, _, _) = decode_png(&out);
+    assert_eq!(width, 100);
+}
+
+#[test]
+fn render_reports_what_it_cannot_read_with_its_path() {
+    let scratch = ScratchDir::new("render-read-failed");
+    let missing = scratch.file("missing.pdf");
+    let notes = scratch.file("notes.pdf");
+    fs::write(&notes, "just some text, not a PDF\n").unwrap();
+    let out = scratch.file("page.png");
+
+    let error = failure_of(
+        &render(&["--json"], "1", &out, &missing),
+        "render",
+        "read_failed",
+    );
+    assert_eq!(error["path"], text(&missing));
+
+    // A file that is there and is not a PDF has the code that the other
+    // commands give it, and their words.
+    let error = failure_of(
+        &render(&["--json"], "1", &out, &notes),
+        "render",
+        "read_failed",
+    );
+    assert_eq!(error["path"], text(&notes));
+    assert_eq!(
+        error["message"],
+        format!("cannot read {} as a PDF", notes.display())
+    );
+    assert_eq!(scratch.entries(), ["notes.pdf"]);
+}
+
+#[test]
+fn render_into_a_missing_folder_is_save_failed() {
+    let scratch = ScratchDir::new("render-missing-folder");
+    let input = scratch.pdf("in.pdf", 1);
+    let out = scratch.file("missing").join("page.png");
+
+    let result = render(&["--json"], "1", &out, &input);
+
+    let error = failure_of(&result, "render", "save_failed");
+    assert_eq!(error["path"], text(&out));
+    assert_eq!(scratch.entries(), ["in.pdf"]);
+}
+
+#[test]
+fn info_and_render_can_disagree_about_a_damaged_file() {
+    // `render` reads the file with PDFium; `info` and the other commands
+    // read it with another library. AGENTS.md names these two cases.
+    let scratch = ScratchDir::new("render-disagree");
+    let out = scratch.file("page.png");
+
+    // A file whose last bytes are gone: they hold the table that says
+    // where each object is. `info` finds the pages without it.
+    let whole = scratch.pdf("whole.pdf", 2);
+    let bytes = fs::read(&whole).unwrap();
+    let cut = scratch.file("cut.pdf");
+    fs::write(&cut, &bytes[..bytes.len() - 150]).unwrap();
+
+    assert_eq!(json_report(&info(&["--json"], &cut))["pages"], 2);
+    let error = failure_of(
+        &render(&["--json"], "1", &out, &cut),
+        "render",
+        "read_failed",
+    );
+    assert_eq!(error["path"], text(&cut));
+
+    // A file whose catalog names no page tree. For `info` it is damaged;
+    // for PDFium it is a document without pages, so there is no page 1.
+    let mut document = with_pages(1);
+    let catalog_id = document
+        .trailer
+        .get(b"Root")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    let bare_catalog = Object::Dictionary(dictionary! { "Type" => "Catalog" });
+    document.objects.insert(catalog_id, bare_catalog);
+    let bare = scratch.save("bare.pdf", document);
+
+    let error = failure_of(&info(&["--json"], &bare), "info", "broken_pdf");
+    assert_eq!(error["path"], text(&bare));
+    let error = failure_of(
+        &render(&["--json"], "1", &out, &bare),
+        "render",
+        "page_out_of_range",
+    );
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("0 pages"), "unexpected message: {message}");
+
+    assert!(!out.exists(), "nothing should be written");
+}
+
+// render and the PDFium library
+
+/// Runs a render that must fail because the library in `library_folder`
+/// is missing or cannot be loaded, and returns its `error` object.
+///
+/// `failure_of` checks the whole contract of a failure with `--json`: exit
+/// code 1, exactly one JSON object on stdout and nothing on stderr.
+fn renderer_unavailable(library_folder: &Path, output: &Path, input: &Path) -> Value {
+    let result = render_with_library(library_folder, &["--json"], "1", output, input);
+    failure_of(&result, "render", "renderer_unavailable")
+}
+
+#[test]
+fn render_without_the_library_is_renderer_unavailable() {
+    let scratch = ScratchDir::new("render-no-library");
+    let input = scratch.pdf("in.pdf", 1);
+    let out = scratch.file("page.png");
+    let empty = scratch.file("no-library-here");
+    fs::create_dir(&empty).unwrap();
+
+    let error = renderer_unavailable(&empty, &out, &input);
+
+    // `path` is the file that was looked for: the folder asked for, and
+    // the name the system gives the library.
+    let library = PathBuf::from(error["path"].as_str().unwrap());
+    assert_eq!(library.parent(), Some(empty.as_path()));
+    let name = library.file_name().unwrap().to_string_lossy();
+    assert!(name.contains("pdfium"), "unexpected library name {name}");
+    assert_eq!(
+        error["message"],
+        format!("the PDFium library is missing: {}", library.display())
+    );
+    assert!(!out.exists(), "nothing should be written");
+
+    // Without `--json`: the same reason, as one line on stderr.
+    let result = render_with_library(&empty, &[], "1", &out, &input);
+
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(stdout(&result), "");
+    assert_eq!(
+        stderr(&result),
+        format!(
+            "error: the PDFium library is missing: {}\n",
+            library.display()
+        )
+    );
+    assert!(!out.exists(), "nothing should be written");
+}
+
+#[test]
+fn a_file_that_is_not_the_library_is_renderer_unavailable_too() {
+    let scratch = ScratchDir::new("render-fake-library");
+    let input = scratch.pdf("in.pdf", 1);
+    let out = scratch.file("page.png");
+    let folder = scratch.file("fake-library");
+    fs::create_dir(&folder).unwrap();
+    // The first failure names the file that was looked for; a file that is
+    // not a library is then put exactly there.
+    let missing = renderer_unavailable(&folder, &out, &input);
+    let library = PathBuf::from(missing["path"].as_str().unwrap());
+    fs::write(&library, "this is not a library").unwrap();
+
+    let error = renderer_unavailable(&folder, &out, &input);
+
+    assert_eq!(error["path"], text(&library));
+    // What the system said about the file follows the path.
+    let message = error["message"].as_str().unwrap();
+    let start = format!("cannot load the PDFium library {}: ", library.display());
+    assert!(
+        message.starts_with(&start) && message.len() > start.len(),
+        "unexpected message: {message}"
+    );
+    assert!(!out.exists(), "nothing should be written");
+}
+
+#[test]
+fn render_looks_for_the_library_next_to_the_program() {
+    // A folder laid out like `dist/`: the program, and next to it the
+    // library. It is a copy of the program under test, because the folder
+    // of the real one belongs to the build and must stay as it is.
+    let scratch = ScratchDir::new("render-next-to-program");
+    let input = scratch.pdf("in.pdf", 1);
+    let out = scratch.file("page.png");
+    let app = scratch.file("app");
+    fs::create_dir(&app).unwrap();
+    let built = Path::new(env!("CARGO_BIN_EXE_danonpdf-cli"));
+    let program = app.join(built.file_name().unwrap());
+    fs::copy(built, &program).unwrap();
+    let render_from_app = |variable: Option<&str>| {
+        let mut command = Command::new(&program);
+        command.args(render_args(&["--json"], "1", &out, &input));
+        match variable {
+            Some(value) => command.env(PDFIUM_DIR, value),
+            None => command.env_remove(PDFIUM_DIR),
+        };
+        run(&mut command)
+    };
+
+    // The variable set to nothing counts as not set: the program looks in
+    // its own folder, where there is no library yet.
+    let error = failure_of(&render_from_app(Some("")), "render", "renderer_unavailable");
+    let library = PathBuf::from(error["path"].as_str().unwrap());
+    assert_eq!(
+        fs::canonicalize(library.parent().unwrap()).unwrap(),
+        fs::canonicalize(&app).unwrap()
+    );
+    assert!(!out.exists(), "nothing should be written");
+
+    // With the library next to the program, and no variable at all, the
+    // page is drawn.
+    let real_folder = std::env::var_os(PDFIUM_DIR)
+        .map(PathBuf::from)
+        .expect("the build image names the folder of the PDFium library");
+    fs::copy(real_folder.join(library.file_name().unwrap()), &library).unwrap();
+
+    let result = render_from_app(None);
+
+    assert_eq!(result.status.code(), Some(0), "{}", stdout(&result));
+    assert_eq!(json_report(&result)["page"], 1);
+    decode_png(&out);
+}
+
+#[test]
+fn the_commands_that_do_not_draw_do_not_need_the_library() {
+    let scratch = ScratchDir::new("render-library-not-needed");
+    let input = scratch.pdf("in.pdf", 3);
+    let out = scratch.file("out.pdf");
+    let empty = scratch.file("no-library-here");
+    fs::create_dir(&empty).unwrap();
+    let without_library = |args: &[&OsStr]| {
+        run(Command::new(env!("CARGO_BIN_EXE_danonpdf-cli"))
+            .args(args)
+            .env(PDFIUM_DIR, &empty))
+    };
+
+    let counted = without_library(&[OsStr::new("info"), OsStr::new("--json"), input.as_os_str()]);
+    let extracted = without_library(&[
+        OsStr::new("extract"),
+        OsStr::new("--json"),
+        OsStr::new("--pages"),
+        OsStr::new("2-"),
+        OsStr::new("--output"),
+        out.as_os_str(),
+        input.as_os_str(),
+    ]);
+
+    assert_eq!(json_report(&counted)["pages"], 3);
+    assert_eq!(json_report(&extracted)["pages"], 2);
 }

@@ -925,6 +925,7 @@ dependencies = [
  "clap",
  "danonpdf-core",
  "lopdf",
+ "png",
  "serde",
  "serde_json",
 ]

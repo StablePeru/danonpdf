@@ -9,8 +9,8 @@
 //! - The help (`--help`) lives in `cli.rs`, next to the arguments it
 //!   describes, because clap builds it from them.
 //! - The reason an operation failed inside the core comes from the core
-//!   (`PdfError` and the errors behind it), and so does the reason a page
-//!   selection is not one (`PageSyntaxError`).
+//!   (`PdfError`, `RenderError` and the errors behind them), and so does
+//!   the reason a page selection is not one (`PageSyntaxError`).
 //!
 //! Sentences that follow "error: " start in lower case, as the core's do, so
 //! the two read the same on the screen.
@@ -74,6 +74,15 @@ pub fn split(pages: usize, outputs: &[PathBuf]) -> String {
     }
 }
 
+/// The line printed when a page was drawn, without `--json`. `width` and
+/// `height` are the size of the image that was written, in pixels.
+pub fn rendered(page: usize, width: u32, height: u32, output: &Path) -> String {
+    format!(
+        "Rendered page {page} ({width} by {height} pixels) into {}",
+        output.display()
+    )
+}
+
 /// Why an operation was refused: `output` is one of the files it reads.
 pub fn output_is_input(output: &Path) -> String {
     format!(
@@ -115,6 +124,29 @@ pub fn too_few_inputs(needed: usize, given: usize) -> String {
 /// <N>': ".
 pub fn not_a_page_count() -> String {
     "the number of pages per file must be a whole number, 1 or more".to_owned()
+}
+
+/// Why the command line was refused: `--page` did not get the number of a
+/// page. clap prints it after "error: invalid value '...' for '--page
+/// <N>': ".
+pub fn not_a_page_number() -> String {
+    "the page must be a whole number, 1 or more: pages are counted from 1".to_owned()
+}
+
+/// Why the command line was refused: `--width` did not get a number of
+/// pixels from 1 to `widest`. clap prints it after "error: invalid value
+/// '...' for '--width <PX>': ".
+pub fn not_an_image_width(widest: u32) -> String {
+    format!("the width must be a whole number of pixels, from 1 to {widest}")
+}
+
+/// Why the command line was refused: the `output` of a render does not end
+/// in `.png`. clap prints it after its own "error: ".
+pub fn output_is_not_png(output: &Path) -> String {
+    format!(
+        "render writes a PNG image, so its output must end in .png; {} does not",
+        output.display()
+    )
 }
 
 #[cfg(test)]
@@ -175,6 +207,43 @@ mod tests {
         // A document always has a page, so a split always writes a file;
         // the sentence does not rely on that.
         assert_eq!(split(0, &[]), "Split 0 pages into 0 files");
+    }
+
+    #[test]
+    fn rendered_names_the_page_the_size_of_the_image_and_the_output() {
+        assert_eq!(
+            rendered(3, 1024, 1449, Path::new("page.png")),
+            "Rendered page 3 (1024 by 1449 pixels) into page.png"
+        );
+        // One pixel each way still reads as a size, not as a count.
+        assert_eq!(
+            rendered(1, 1, 1, Path::new("dot.png")),
+            "Rendered page 1 (1 by 1 pixels) into dot.png"
+        );
+    }
+
+    #[test]
+    fn not_a_page_number_says_where_pages_start() {
+        assert_eq!(
+            not_a_page_number(),
+            "the page must be a whole number, 1 or more: pages are counted from 1"
+        );
+    }
+
+    #[test]
+    fn not_an_image_width_says_what_is_allowed() {
+        assert_eq!(
+            not_an_image_width(4096),
+            "the width must be a whole number of pixels, from 1 to 4096"
+        );
+    }
+
+    #[test]
+    fn output_is_not_png_names_the_file_and_the_ending_it_needs() {
+        assert_eq!(
+            output_is_not_png(Path::new("page.jpg")),
+            "render writes a PNG image, so its output must end in .png; page.jpg does not"
+        );
     }
 
     #[test]

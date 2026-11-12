@@ -23,23 +23,34 @@
 //! is how `--pages` is checked: its field is a `PageSelection`, the core
 //! knows how to read one from text, and what the core refuses clap reports.
 //!
-//! One rule is checked here and not by clap: "at least two inputs" (see
-//! [`MergeArgs::check`]). It is reported through clap all the same, so it
-//! looks and ends like every other usage error.
+//! Two rules are checked here and not by clap: "at least two inputs" (see
+//! [`MergeArgs::check`]) and "the image is written to a `.png` file" (see
+//! [`RenderArgs::check`]). They are reported through clap all the same, so
+//! they look and end like every other usage error.
 
 use std::ffi::OsString;
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use danonpdf_core::PageSelection;
+use danonpdf_core::{MAX_RENDER_WIDTH, PageSelection};
 
 use crate::outcome::Operation;
 use crate::texts;
 
 /// A merge of fewer files than this is a mistake in the command line.
 const MIN_INPUTS: usize = 2;
+
+/// How wide `render` draws a page, in pixels, when `--width` is not given.
+///
+/// 1024 pixels is about 124 dots per inch for an A4 page (1024 by 1449
+/// pixels): body text is easy to read, for a person and for a model that
+/// looks at the image, and the PNG of a page of text stays well under a
+/// megabyte. It is a quarter of the widest image the core draws
+/// (`MAX_RENDER_WIDTH`), so a caller that needs more detail has room to
+/// ask for it.
+const DEFAULT_RENDER_WIDTH: u32 = 1024;
 
 // The part of the help that a caller needs to use the tool without reading
 // anything else: examples, the rules, the exit codes and the JSON shapes.
@@ -52,11 +63,17 @@ const MIN_INPUTS: usize = 2;
 //
 // The lines are kept under 80 columns by hand, except the JSON examples,
 // which must stay on one line to be copied.
+//
+// A constant text cannot take a number from another constant, so the limits
+// of an image (its widest and tallest size, and the default width) are
+// typed here by hand. The test `the_help_states_the_limits_of_an_image`
+// compares them with the constants they copy.
 const CONTRACT: &str = r#"Examples:
   danonpdf-cli merge --json --output merged.pdf first.pdf second.pdf
   danonpdf-cli info --json report.pdf
   danonpdf-cli extract --json --pages 1-3,7,10- --output part.pdf report.pdf
   danonpdf-cli split --json --every 10 --output-dir parts report.pdf
+  danonpdf-cli render --json --page 1 --output page.png report.pdf
 
 Pages (the --pages of extract):
   A list of items separated by commas. Pages are counted from 1.
@@ -72,6 +89,35 @@ Pages (the --pages of extract):
   exit code 2. A page past the end of the document is found only once the
   file is open: exit code 1, error code page_out_of_range. Run info first
   to learn how many pages a file has.
+
+Images (render):
+  render draws one page, --page N counted from 1, and writes it as a PNG
+  file: 8 bits per channel with alpha, on white paper that is fully opaque.
+  --width is the width of the image in pixels, from 1 to 4096. Without it
+  the image is 1024 pixels wide. The height follows from the shape of the
+  page: an A4 page drawn 1024 pixels wide is 1449 pixels high.
+  A very tall page is drawn narrower than asked, so that its image is
+  at most 8192 pixels high. The report gives the size of the image that
+  was written: read "width" and "height" there, not from the command
+  line.
+  --output must end in .png, in any letter case: the tool adds no
+  extension, and what it writes is a PNG whatever the name says.
+  --page 0, a --width out of range and an --output that does not end in
+  .png are usage errors: exit code 2. A page past the end of the document
+  is found only once the file is open: exit code 1, error code
+  page_out_of_range.
+  render reads the file with PDFium, the other commands with another
+  library, and the two do not always agree about a damaged file: one that
+  info counts may fail to render, and the other way round.
+
+The PDFium library (render only):
+  render loads PDFium from a file when it runs: pdfium.dll on Windows,
+  libpdfium.so on Linux. It looks for that file in the folder of the
+  program itself, or in the folder named by the environment variable
+  DANONPDF_PDFIUM_DIR when it is set and not empty. Nowhere else: not in
+  the current folder and not along PATH. If the file is not there or
+  cannot be loaded: exit code 1, error code renderer_unavailable.
+  merge, info, extract and split do not need it.
 
 Rules:
   - Every input is read as given: none is skipped for its name, and merge
@@ -107,13 +153,16 @@ Output with --json:
   {"ok":true,"operation":"info","input":"report.pdf","pages":12}
   {"ok":true,"operation":"extract","output":"part.pdf","pages":7}
   {"ok":true,"operation":"split","outputs":["parts/report-001.pdf","parts/report-002.pdf"],"files":2,"pages":12}
+  {"ok":true,"operation":"render","output":"page.png","page":1,"width":1024,"height":1449}
   failure, one shape for every command:
   {"ok":false,"operation":"merge","error":{"code":"output_exists","message":"...","path":"merged.pdf"}}
   "input", "output" and "outputs" are paths as given, "outputs" in page
   order. "inputs" is the number of files read and "files" the number of
   files written. "pages" is the number of pages of the input (info, split)
-  or of the output (merge, extract). "message" is for people; "path" is
-  the file the error is about, and the key is left out when there is none.
+  or of the output (merge, extract). "page" is the page that was drawn,
+  and "width" and "height" the size in pixels of the image that was
+  written (render). "message" is for people; "path" is the file the error
+  is about, and the key is left out when there is none.
   A split that stops after writing some of its files adds "written" to
   "error": the files already written, in order. They are complete and are
   kept, and "path" is the file that failed. No other failure has the key.
@@ -128,17 +177,25 @@ Error codes (stable: test for these, not for the message):
                      command line, which refuses fewer than two inputs first
                      as a usage error (exit code 2, plain text on stderr)
   read_failed        an input could not be read, or is not a PDF
-  encrypted          an input needs a password
+  encrypted          an input needs a password; for render, also an input
+                     protected in a way that cannot be opened at all
   broken_pdf         an input opened, but its structure is damaged
-  page_out_of_range  --pages names a page past the end of the document
+  page_out_of_range  --pages or --page names a page past the end of the
+                     document
   save_failed        an output file, or the folder for it, could not be
-                     written"#;
+                     written
+  renderer_unavailable
+                     the PDFium library is missing or cannot be loaded;
+                     "path" is the library file that was looked for. Only
+                     render reports it, and nothing is wrong with the input
+  render_failed      PDFium could not draw the page and gave no reason that
+                     has a code of its own. Only render reports it"#;
 
 // Shown under the short help (`-h`), which leaves the contract out.
 const HELP_POINTER: &str =
     "Run with --help for examples, the page syntax, the exit codes and the JSON output.";
 
-/// Merge, split and inspect PDF files: local, no network, no questions
+/// Merge, split, inspect and draw PDF files: local, no network, no questions
 ///
 /// DanonPDF for scripts and AI agents. It does one operation per run, never
 /// waits for input, and reports the result as a line of text or, with
@@ -186,10 +243,12 @@ impl Cli {
     {
         let cli = Self::try_parse_from(args)?;
         // One arm per command, each with the checks that clap cannot do.
-        // Only a merge has one; the other three are named all the same, so
-        // that a new command has to be placed here on purpose.
+        // A merge and a render have one each; the other three are named
+        // all the same, so that a new command has to be placed here on
+        // purpose.
         match &cli.command {
             Command::Merge(merge) => merge.check()?,
+            Command::Render(render) => render.check()?,
             Command::Info(_) | Command::Extract(_) | Command::Split(_) => {}
         }
         Ok(cli)
@@ -236,6 +295,14 @@ pub enum Command {
         after_long_help = CONTRACT
     )]
     Split(SplitArgs),
+
+    /// Draw one page of a PDF file and write it as a PNG image
+    #[command(
+        name = Operation::Render.name(),
+        after_help = HELP_POINTER,
+        after_long_help = CONTRACT
+    )]
+    Render(RenderArgs),
 }
 
 impl Command {
@@ -248,6 +315,7 @@ impl Command {
             Self::Info(_) => Operation::Info,
             Self::Extract(_) => Operation::Extract,
             Self::Split(_) => Operation::Split,
+            Self::Render(_) => Operation::Render,
         }
     }
 }
@@ -286,21 +354,31 @@ impl MergeArgs {
             return Ok(());
         }
         let message = texts::too_few_inputs(MIN_INPUTS, self.inputs.len());
+        Err(usage_error(
+            Operation::Merge,
+            ErrorKind::TooFewValues,
+            message,
+        ))
+    }
+}
 
-        // The error is built by clap, from the `merge` command, so it gets
-        // the same "error:" prefix, usage line, colours and exit code as
-        // the mistakes clap finds itself. `build` fills in what clap only
-        // works out when it parses, such as the full name "danonpdf-cli
-        // merge" that the usage line shows.
-        let mut command = Cli::command();
-        command.build();
-        Err(match command.find_subcommand_mut(Operation::Merge.name()) {
-            Some(merge) => merge.error(ErrorKind::TooFewValues, message),
-            // Not reached: the command is named after the same
-            // operation above. If it ever is, the error is still
-            // reported, with a plainer usage line.
-            None => command.error(ErrorKind::TooFewValues, message),
-        })
+/// A usage error about the command of `operation`, for a rule that is
+/// checked in this file and not by clap.
+///
+/// The error is built by clap, from that command, so it gets the same
+/// "error:" prefix, usage line, colours and exit code as the mistakes clap
+/// finds itself. `kind` is clap's own name for the sort of mistake.
+fn usage_error(operation: Operation, kind: ErrorKind, message: String) -> clap::Error {
+    let mut command = Cli::command();
+    // `build` fills in what clap only works out when it parses, such as the
+    // full name "danonpdf-cli merge" that the usage line shows.
+    command.build();
+    match command.find_subcommand_mut(operation.name()) {
+        Some(subcommand) => subcommand.error(kind, message),
+        // Not reached: every command is named after its operation (see
+        // `Command`). If it ever is, the error is still reported, with a
+        // plainer usage line.
+        None => command.error(kind, message),
     }
 }
 
@@ -380,6 +458,81 @@ pub struct SplitArgs {
     pub input: PathBuf,
 }
 
+#[derive(Debug, Args)]
+pub struct RenderArgs {
+    /// The page to draw, counted from 1
+    // `NonZeroUsize`, as for `--every`: "page 0" never gets past the
+    // parser, and the core's `render_page` takes this very type, so there
+    // is no number to check again on the way.
+    #[arg(long, value_name = "N", value_parser = page_number)]
+    pub page: NonZeroUsize,
+
+    // No doc comment on this field: its help is the `help = ...` below. A
+    // doc comment is fixed text, and this sentence names the widest image
+    // the core draws. Built with `format!` from the core's constant, the
+    // help cannot fall behind it. clap adds "[default: 1024]" by itself,
+    // from `default_value_t`.
+    #[arg(
+        long,
+        value_name = "PX",
+        default_value_t = DEFAULT_RENDER_WIDTH,
+        value_parser = image_width,
+        help = format!(
+            "The width of the image in pixels, from 1 to {MAX_RENDER_WIDTH}; the height follows the page"
+        )
+    )]
+    pub width: u32,
+
+    /// Where to write the PNG image; the name must end in .png
+    #[arg(long, value_name = "FILE")]
+    pub output: PathBuf,
+
+    /// Replace the output if it already exists (it may never be the input)
+    #[arg(long)]
+    pub force: bool,
+
+    /// Print the result as one JSON object on stdout, also when it fails
+    #[arg(long)]
+    pub json: bool,
+
+    /// The PDF file to draw a page of
+    #[arg(value_name = "INPUT")]
+    pub input: PathBuf,
+}
+
+impl RenderArgs {
+    /// The rule clap cannot express: the output is named as a PNG file.
+    ///
+    /// The tool never adds an extension to an output, and what a render
+    /// writes is a PNG whatever its name says. A `page.jpg` that holds a
+    /// PNG would mislead whoever opens it next, so the name is refused
+    /// before anything is read or written.
+    ///
+    /// Why not a `value_parser` on the field, like the two numbers have:
+    /// such a function is handed the argument as text (`&str`), so clap
+    /// would first refuse a path that is not valid UTF-8. Checked here,
+    /// the path stays the `PathBuf` it was parsed into.
+    fn check(&self) -> Result<(), clap::Error> {
+        if is_png_path(&self.output) {
+            return Ok(());
+        }
+        Err(usage_error(
+            Operation::Render,
+            ErrorKind::ValueValidation,
+            texts::output_is_not_png(&self.output),
+        ))
+    }
+}
+
+/// Whether `path` names a PNG file by its extension, in any letter case
+/// (`page.png`, `PAGE.PNG`). Only the name is looked at, never the disk.
+fn is_png_path(path: &Path) -> bool {
+    // Compared as `OsStr`, without turning the name into text first: a
+    // file name is not always valid UTF-8.
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+}
+
 /// Reads the value of `--every`.
 ///
 /// `text.parse()` alone would do: it already refuses 0, a fraction and
@@ -388,6 +541,30 @@ pub struct SplitArgs {
 /// whatever the reason was for one sentence that says what is wanted.
 fn pages_per_file(text: &str) -> Result<NonZeroUsize, String> {
     text.parse().map_err(|_| texts::not_a_page_count())
+}
+
+/// Reads the value of `--page`, with a reason of its own for the same
+/// purpose as [`pages_per_file`].
+fn page_number(text: &str) -> Result<NonZeroUsize, String> {
+    text.parse().map_err(|_| texts::not_a_page_number())
+}
+
+/// Reads the value of `--width`: a whole number of pixels from 1 to the
+/// widest image the core draws.
+///
+/// The core checks the same range again when it is asked to draw. It is
+/// checked here first so that a width out of range is a usage error (exit
+/// code 2, before any file is opened), like every other value that cannot
+/// be right whatever the file holds. The limit is the core's constant, not
+/// a number of this file, so the two checks cannot disagree.
+fn image_width(text: &str) -> Result<u32, String> {
+    // A `match` with a guard: the first arm takes a number that parsed
+    // *and* is in range. Everything else (not a number, a fraction, 0, too
+    // wide) falls to the second arm and gets the same sentence.
+    match text.parse::<u32>() {
+        Ok(width) if (1..=MAX_RENDER_WIDTH).contains(&width) => Ok(width),
+        _ => Err(texts::not_an_image_width(MAX_RENDER_WIDTH)),
+    }
 }
 
 #[cfg(test)]
@@ -426,6 +603,14 @@ mod tests {
         split
     }
 
+    /// The arguments of the `render` command in `args`.
+    fn render_args(args: &[&str]) -> RenderArgs {
+        let Command::Render(render) = parse(args).unwrap().command else {
+            panic!("{args:?} is not a render");
+        };
+        render
+    }
+
     #[test]
     fn the_declarations_are_consistent() {
         // clap checks many mistakes (two flags with one name, a required
@@ -439,7 +624,7 @@ mod tests {
         // A smallest valid command line for each command, starting with the
         // name of its operation. If the name typed and the operation ever
         // came apart, the line would not parse, or would run another one.
-        let lines: [(Operation, &[&str]); 4] = [
+        let lines: [(Operation, &[&str]); 5] = [
             (Operation::Merge, &["--output", "o.pdf", "a.pdf", "b.pdf"]),
             (Operation::Info, &["a.pdf"]),
             (
@@ -447,6 +632,10 @@ mod tests {
                 &["--pages", "1", "--output", "o.pdf", "a.pdf"],
             ),
             (Operation::Split, &["--output-dir", "parts", "a.pdf"]),
+            (
+                Operation::Render,
+                &["--page", "1", "--output", "o.png", "a.pdf"],
+            ),
         ];
         for (operation, rest) in lines {
             let args: Vec<&str> = std::iter::once(operation.name())
@@ -668,6 +857,152 @@ mod tests {
 
             assert_eq!(error.exit_code(), 2, "{line:?}");
         }
+    }
+
+    // render
+
+    #[test]
+    fn render_takes_a_page_an_output_and_one_input() {
+        let render = render_args(&["render", "--page", "3", "--output", "page.png", "in.pdf"]);
+
+        assert_eq!(render.page.get(), 3);
+        assert_eq!(render.width, DEFAULT_RENDER_WIDTH);
+        assert_eq!(render.output, PathBuf::from("page.png"));
+        assert_eq!(render.input, PathBuf::from("in.pdf"));
+        assert!(!render.force, "--force must be off unless given");
+        assert!(!render.json, "--json must be off unless given");
+
+        let render = render_args(&[
+            "render", "--width", "200", "--page", "1", "--output", "p.png", "in.pdf",
+        ]);
+        assert_eq!(render.width, 200);
+    }
+
+    #[test]
+    fn the_page_must_be_a_whole_number_from_1_up() {
+        for page in ["0", "abc", "1.5", "", "1-3"] {
+            let error =
+                parse(&["render", "--page", page, "--output", "p.png", "in.pdf"]).unwrap_err();
+
+            assert_eq!(error.kind(), ErrorKind::ValueValidation, "{page:?}");
+            assert_eq!(error.exit_code(), 2, "{page:?}");
+            let text = error.to_string();
+            assert!(text.contains("--page <N>"), "{page:?} gave: {text}");
+            assert!(
+                text.contains("pages are counted from 1"),
+                "{page:?} gave: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_width_must_be_one_that_the_core_draws() {
+        let widest = MAX_RENDER_WIDTH.to_string();
+        let too_wide = (MAX_RENDER_WIDTH + 1).to_string();
+        let line = |width| {
+            parse(&[
+                "render", "--page", "1", "--width", width, "--output", "p.png", "in.pdf",
+            ])
+        };
+
+        // Both ends of the range are in it.
+        for width in ["1", widest.as_str()] {
+            assert!(line(width).is_ok(), "{width:?} should be accepted");
+        }
+        for width in ["0", too_wide.as_str(), "abc", "1.5", "", "4294967296"] {
+            let error = line(width).unwrap_err();
+
+            assert_eq!(error.kind(), ErrorKind::ValueValidation, "{width:?}");
+            assert_eq!(error.exit_code(), 2, "{width:?}");
+            let text = error.to_string();
+            assert!(text.contains("--width <PX>"), "{width:?} gave: {text}");
+            assert!(
+                text.contains(&format!("from 1 to {widest}")),
+                "{width:?} gave: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_output_of_a_render_must_end_in_png() {
+        let line = |output| parse(&["render", "--page", "1", "--output", output, "in.pdf"]);
+
+        for output in ["page.png", "PAGE.PNG", "out/Page.Png", "page.pdf.png"] {
+            assert!(line(output).is_ok(), "{output:?} should be accepted");
+        }
+        // `.png` alone is a hidden file with no extension, as `.pdf` is for
+        // the core's `is_pdf_path`.
+        for output in ["page.jpg", "page", "page.png.bak", "page.", ".png"] {
+            let error = line(output).unwrap_err();
+
+            assert_eq!(error.kind(), ErrorKind::ValueValidation, "{output:?}");
+            assert_eq!(error.exit_code(), 2, "{output:?}");
+            // Written like clap's own errors: the reason, then how to call
+            // the `render` command.
+            let text = error.to_string();
+            assert!(
+                text.starts_with("error: render writes a PNG image"),
+                "{output:?} gave: {text}"
+            );
+            assert!(text.contains(output), "{output:?} gave: {text}");
+            assert!(
+                text.contains("Usage: danonpdf-cli render"),
+                "{output:?} gave: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_needs_a_page_an_output_and_one_input() {
+        let lines: [&[&str]; 4] = [
+            &["render", "--output", "p.png", "in.pdf"],
+            &["render", "--page", "1", "in.pdf"],
+            &["render", "--page", "1", "--output", "p.png"],
+            &[
+                "render", "--page", "1", "--output", "p.png", "a.pdf", "b.pdf",
+            ],
+        ];
+        for line in lines {
+            let error = parse(line).unwrap_err();
+
+            assert_eq!(error.exit_code(), 2, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn the_help_states_the_limits_of_an_image() {
+        use danonpdf_core::{MAX_RENDER_HEIGHT, PDFIUM_DIR_VARIABLE};
+
+        // The contract is a constant text, so these numbers and this name
+        // are typed in it by hand. Each must still be what the code uses.
+        for expected in [
+            format!("from 1 to {MAX_RENDER_WIDTH}. Without it"),
+            format!("the image is {DEFAULT_RENDER_WIDTH} pixels wide"),
+            format!("most {MAX_RENDER_HEIGHT} pixels high"),
+            format!("variable\n  {PDFIUM_DIR_VARIABLE} when it is set"),
+            format!(r#""width":{DEFAULT_RENDER_WIDTH},"#),
+        ] {
+            assert!(CONTRACT.contains(&expected), "the help lacks {expected:?}");
+        }
+
+        // The short help of `--width` is built from the same constants.
+        let command = Cli::command();
+        let render = command
+            .find_subcommand(Operation::Render.name())
+            .expect("there is a render command");
+        let width = render
+            .get_arguments()
+            .find(|argument| argument.get_id() == "width")
+            .expect("render has a --width");
+        let help = width.get_help().expect("--width has a help").to_string();
+        assert!(
+            help.contains(&format!("from 1 to {MAX_RENDER_WIDTH}")),
+            "unexpected: {help}"
+        );
+        assert_eq!(
+            width.get_default_values(),
+            [DEFAULT_RENDER_WIDTH.to_string().as_str()]
+        );
     }
 
     // Help and version
