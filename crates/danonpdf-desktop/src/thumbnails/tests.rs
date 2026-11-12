@@ -1,11 +1,14 @@
 //! Tests for the Pages view's state. None of them opens a window, and all
-//! but the last three start no thread either: a test plays both the
-//! drawing code (it says which rows are on screen) and the worker (it
-//! hands in the replies), so every rule is checked one step at a time.
+//! but three start no thread either: a test plays both the drawing code
+//! (it says which rows are on screen) and the worker (it hands in the
+//! replies), so every rule is checked one step at a time. The three that
+//! do start a thread are together near the end, under "With a real worker
+//! thread".
 //!
 //! No file is read anywhere in this state, which is the point of it: the
 //! paths below name files that do not exist.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 use std::sync::mpsc;
@@ -237,17 +240,10 @@ fn the_answer_about_a_file_that_was_replaced_is_ignored() {
 
 #[test]
 fn a_file_that_cannot_be_opened_is_not_shown_and_the_status_says_why() {
-    let denied = || io::Error::new(io::ErrorKind::PermissionDenied, "access denied");
+    // The errors that name no file. The two that do are in the next test.
     let errors = [
         RenderError::Encrypted,
         RenderError::UnsupportedProtection,
-        RenderError::NotPdf {
-            path: doc("report.pdf"),
-        },
-        RenderError::Read {
-            path: doc("report.pdf"),
-            source: denied(),
-        },
         RenderError::Broken {
             reason: "a page cannot be read",
         },
@@ -273,6 +269,73 @@ fn a_file_that_cannot_be_opened_is_not_shown_and_the_status_says_why() {
             }
         );
     }
+}
+
+#[test]
+fn the_status_names_the_file_by_its_name_and_not_by_its_whole_path() {
+    let denied = || io::Error::new(io::ErrorKind::PermissionDenied, "access denied");
+    // The core names the file by the path it was given, folder included,
+    // which is what the command-line tool needs. The window names files
+    // by their name alone, and a whole path makes the line too long for a
+    // narrow window. Each case: the error as the worker sends it, and the
+    // same error about the bare name, whose words are the ones expected.
+    let cases = [
+        (
+            RenderError::NotPdf {
+                path: doc("report.pdf"),
+            },
+            RenderError::NotPdf {
+                path: PathBuf::from("report.pdf"),
+            },
+        ),
+        (
+            RenderError::Read {
+                path: doc("report.pdf"),
+                source: denied(),
+            },
+            RenderError::Read {
+                path: PathBuf::from("report.pdf"),
+                source: denied(),
+            },
+        ),
+    ];
+
+    for (error, about_the_name) in cases {
+        let message = error_chain(&about_the_name);
+        let mut state = Thumbnails::default();
+        state.choose([doc("report.pdf")]);
+
+        state.receive(Reply::Opened {
+            generation: state.generation().current(),
+            result: Err(error),
+        });
+
+        assert_eq!(state.document(), &Document::None, "{message}");
+        // The status still holds the whole path, apart from the message:
+        // the drawing code shows it when the line is hovered.
+        assert_eq!(
+            state.status(),
+            &Status::NotAccepted {
+                file: doc("report.pdf"),
+                message: message.clone()
+            }
+        );
+        assert!(!message.contains("docs"), "{message}");
+    }
+
+    // What the user reads for a file that is not a PDF, in full.
+    let mut state = Thumbnails::default();
+    state.choose([doc("notes.pdf")]);
+    state.receive(Reply::Opened {
+        generation: state.generation().current(),
+        result: Err(RenderError::NotPdf {
+            path: doc("notes.pdf"),
+        }),
+    });
+    let Status::NotAccepted { message, .. } = state.status() else {
+        panic!("unexpected status: {:?}", state.status());
+    };
+    assert_eq!(message, "cannot read notes.pdf as a PDF");
 }
 
 #[test]
@@ -520,6 +583,32 @@ fn a_page_that_cannot_be_drawn_is_marked_with_the_reason() {
 }
 
 #[test]
+fn a_page_that_cannot_be_read_names_the_file_by_its_name() {
+    let mut state = open_document(10);
+    state.show_rows(0..1, 4, SIZE);
+    state.take_requests();
+
+    // The file was taken away while its pages were being drawn.
+    state.receive(Reply::Page {
+        generation: state.generation().current(),
+        page: NonZeroUsize::new(2).unwrap(),
+        result: Err(RenderError::Read {
+            path: doc("report.pdf"),
+            source: io::Error::new(io::ErrorKind::NotFound, "no such file"),
+        }),
+    });
+
+    // The reason is shown in a box 160 points wide: the folder would
+    // push the part that matters out of it.
+    assert_eq!(
+        state.slot(2),
+        Some(&Slot::Failed {
+            reason: "cannot read report.pdf: no such file".to_owned()
+        })
+    );
+}
+
+#[test]
 fn a_reply_of_an_older_generation_is_ignored() {
     let mut state = open_document(10);
     state.show_rows(0..1, 4, SIZE);
@@ -605,6 +694,58 @@ fn choosing_another_file_starts_a_new_generation_from_nothing() {
             path: doc("other.pdf")
         }]
     );
+}
+
+#[test]
+fn a_file_that_was_just_chosen_is_shown_from_its_top_once() {
+    let mut state = Thumbnails::default();
+    // No file was chosen: nothing to go back to the top of.
+    assert!(!state.take_scroll_to_top());
+
+    state.choose([doc("report.pdf")]);
+    state.take_requests();
+    state.receive(Reply::Opened {
+        generation: state.generation().current(),
+        result: Ok(100),
+    });
+
+    // The drawing code asks when it draws the grid, which is only now
+    // that the file is open: the answer waited for it.
+    assert!(state.take_scroll_to_top());
+    // Once. From the next frame on, where the grid stands is the user's
+    // business.
+    assert!(!state.take_scroll_to_top());
+
+    // The user scrolls far down and chooses another file: that one must
+    // not open at the row the first one was left at.
+    state.show_rows(20..22, 4, SIZE);
+    state.choose([doc("other.pdf")]);
+    assert!(state.take_scroll_to_top());
+}
+
+#[test]
+fn only_a_file_that_was_chosen_takes_the_view_back_to_the_top() {
+    let mut state = open_document(100);
+    // The frame that first drew the grid.
+    assert!(state.take_scroll_to_top());
+    state.show_rows(20..22, 4, SIZE);
+
+    // Leaving the view and coming back.
+    state.hide();
+    state.show_rows(20..22, 4, SIZE);
+    assert!(!state.take_scroll_to_top());
+
+    // Files that are not PDFs: the file on screen stays, where it was.
+    state.choose([doc("photo.jpg")]);
+    assert!(!state.take_scroll_to_top());
+
+    // Another scale: the same file, drawn again.
+    state.show_rows(20..22, 4, thumbnail_size(2.0));
+    assert!(!state.take_scroll_to_top());
+
+    // Scrolling.
+    state.show_rows(40..42, 4, thumbnail_size(2.0));
+    assert!(!state.take_scroll_to_top());
 }
 
 // Scrolling, leaving and coming back
@@ -877,6 +1018,30 @@ fn as_many_columns_as_fit_and_never_none() {
 }
 
 #[test]
+fn the_grid_stands_in_the_middle_of_the_room_there_is() {
+    // Cells 160 wide with 8 between them: four take 664. In a room of 700
+    // that leaves 36, half of it on each side.
+    assert_eq!(grid_offset(700.0, 160.0, 8.0, 4, 100), 18.0);
+    assert_eq!(grid_offset(664.0, 160.0, 8.0, 4, 100), 0.0);
+    // A last row that is not full does not move the grid: five pages in
+    // four columns are laid out under the same four columns.
+    assert_eq!(grid_offset(700.0, 160.0, 8.0, 4, 5), 18.0);
+    assert_eq!(grid_offset(700.0, 160.0, 8.0, 4, 4), 18.0);
+
+    // Fewer pages than one row holds: those few are centred, and not left
+    // at the start of a row that is mostly empty. Two cells take 328, one
+    // takes 160.
+    assert_eq!(grid_offset(700.0, 160.0, 8.0, 4, 2), 186.0);
+    assert_eq!(grid_offset(700.0, 160.0, 8.0, 4, 1), 270.0);
+
+    // A room narrower than one thumbnail: the grid starts at the edge.
+    assert_eq!(grid_offset(100.0, 160.0, 8.0, 1, 10), 0.0);
+    // Numbers that make no sense still give a place to draw at.
+    assert_eq!(grid_offset(f32::NAN, 160.0, 8.0, 4, 10), 0.0);
+    assert_eq!(grid_offset(700.0, 160.0, 8.0, 0, 0), 270.0);
+}
+
+#[test]
 fn rows_are_counted_with_the_last_one_that_is_not_full() {
     assert_eq!(row_count(12, 4), 3);
     assert_eq!(row_count(13, 4), 4);
@@ -902,12 +1067,134 @@ fn an_image_is_fitted_into_the_box_keeping_its_shape() {
     assert_eq!(fit_within([0, 0], 160.0, 226.0), (0.0, 0.0));
 }
 
+// The pictures the drawing code keeps
+//
+// In the window a picture is a texture, which needs a graphics card. Here
+// it is a note of which file was on screen when it was made and of which
+// page it is, which is all that the rule is about.
+
+/// What stands in for a texture: the file it was made for, and the page.
+type Picture = (&'static str, usize);
+
+/// Plays the frame of a window that shows `file`: brings `pictures` in
+/// line with the state, and returns how many pictures were made.
+fn update(
+    state: &mut Thumbnails,
+    pictures: &mut BTreeMap<usize, Picture>,
+    file: &'static str,
+) -> usize {
+    let mut made = 0;
+    state.update_pictures(pictures, |page, image| {
+        // The image handed over for a page is the image of that page.
+        assert_eq!(image, image_of(page));
+        made += 1;
+        (file, page)
+    });
+    made
+}
+
+#[test]
+fn every_drawn_page_gets_one_picture_made_from_its_image() {
+    let mut state = open_document(10);
+    let mut pictures = BTreeMap::new();
+    state.show_rows(0..1, 4, SIZE);
+    let requests = state.take_requests();
+    // Pages 1 to 4 arrive; 5 to 8 are still waited for.
+    for request in &requests[..4] {
+        state.receive(drawn(request));
+    }
+
+    assert_eq!(update(&mut state, &mut pictures, "report"), 4);
+
+    let expected: BTreeMap<usize, Picture> = (1..=4).map(|page| (page, ("report", page))).collect();
+    assert_eq!(pictures, expected);
+    // The next frame has nothing to make and nothing to drop: an image
+    // becomes a picture once.
+    assert_eq!(update(&mut state, &mut pictures, "report"), 0);
+    assert_eq!(pictures, expected);
+}
+
+#[test]
+fn a_picture_never_passes_for_the_same_page_of_another_file() {
+    let mut state = open_document(8);
+    let mut pictures = BTreeMap::new();
+    state.show_rows(0..1, 4, SIZE);
+    draw_everything_asked_for(&mut state);
+    update(&mut state, &mut pictures, "report");
+    assert_eq!(pictures.len(), 8);
+
+    // Another file is chosen, opened and drawn, and the pictures are not
+    // looked at once in between: no frame found the state empty. Page 1
+    // is drawn in both files, and the picture kept is of the first one.
+    state.choose([doc("other.pdf")]);
+    state.take_requests();
+    state.receive(Reply::Opened {
+        generation: state.generation().current(),
+        result: Ok(3),
+    });
+    state.show_rows(0..1, 4, SIZE);
+    draw_everything_asked_for(&mut state);
+
+    assert_eq!(update(&mut state, &mut pictures, "other"), 3);
+
+    // Every picture is of the new file, and the pages it does not have
+    // are gone.
+    let expected: BTreeMap<usize, Picture> = (1..=3).map(|page| (page, ("other", page))).collect();
+    assert_eq!(pictures, expected);
+}
+
+#[test]
+fn a_page_that_is_no_longer_drawn_loses_its_picture() {
+    let mut state = open_document(1000);
+    let mut pictures = BTreeMap::new();
+    state.show_rows(0..10, 1, SIZE);
+    draw_everything_asked_for(&mut state);
+    update(&mut state, &mut pictures, "report");
+    assert_eq!(
+        pictures.keys().copied().collect::<Vec<_>>(),
+        (1..=11).collect::<Vec<_>>()
+    );
+
+    // Leaving the view keeps what was drawn, pictures included.
+    state.hide();
+    update(&mut state, &mut pictures, "report");
+    assert_eq!(pictures.len(), 11);
+
+    // Forgotten to save memory: the user pages far down, and the pages at
+    // the top are the farthest ones.
+    for first_row in (0..500).step_by(10) {
+        state.show_rows(first_row..first_row + 10, 1, SIZE);
+        draw_everything_asked_for(&mut state);
+        update(&mut state, &mut pictures, "report");
+    }
+    assert_eq!(pictures.len(), MAX_KEPT);
+    assert_eq!(
+        pictures.keys().copied().collect::<Vec<_>>(),
+        pages_with_a_slot(&state, 1000)
+    );
+
+    // Drawn again at another size: the old pictures go at once, before
+    // the new images arrive, and not one stays to be shown blurred.
+    state.show_rows(490..500, 1, thumbnail_size(2.0));
+    assert_eq!(update(&mut state, &mut pictures, "report"), 0);
+    assert!(pictures.is_empty());
+
+    // A file that is closed takes every picture with it.
+    draw_everything_asked_for(&mut state);
+    update(&mut state, &mut pictures, "report");
+    assert!(!pictures.is_empty());
+    state.choose([doc("other.pdf")]);
+    update(&mut state, &mut pictures, "other");
+    assert!(pictures.is_empty());
+}
+
 // With a real worker thread
 //
-// The three tests below join the two halves: this state on one side, and
-// a worker thread with a small fake engine on the other. They wait for
-// the worker the way the window does, by being woken, and never by
-// sleeping (see the tests of `thumbnail_worker.rs`).
+// The next three tests join the two halves: this state on one side, and a
+// worker thread with a small fake engine on the other. They wait for the
+// worker the way the window does, by being woken, and never by sleeping
+// (see the tests of `thumbnail_worker.rs`). The test after them, the last
+// one of the file, is about a thread that never started, and starts none.
 
 /// The longest a test waits for the worker before it fails.
 const GUARD: Duration = Duration::from_secs(30);
@@ -1001,8 +1288,14 @@ fn a_worker_that_died_is_noticed_and_the_view_says_so() {
 
     // The request makes the engine panic, which ends the worker thread.
     // (The panic prints its message in the output of this test.)
+    //
+    // What this first exchange answers is not looked at. It sends the
+    // request and then looks for replies, and by then the thread may or
+    // may not have died already: the answer is whichever thread was
+    // faster. What does not depend on that is checked below, once the
+    // thread is known to be gone.
     state.choose([doc("other.pdf")]);
-    assert!(state.exchange(&worker));
+    let _ = state.exchange(&worker);
     assert!(worker.join().is_err());
 
     // The thread is gone, and with it its end of the channels.
@@ -1021,7 +1314,9 @@ fn after_a_worker_died_a_new_one_serves_the_next_file() {
     let mut dead =
         Worker::spawn(state.generation().clone(), || Ok(Panics), Box::new(|| {})).unwrap();
     state.choose([doc("report.pdf")]);
-    assert!(state.exchange(&dead));
+    // As in the test above: only the exchange after the thread is known
+    // to be gone has one possible answer.
+    let _ = state.exchange(&dead);
     assert!(dead.join().is_err());
     assert!(!state.exchange(&dead));
     drop(dead);

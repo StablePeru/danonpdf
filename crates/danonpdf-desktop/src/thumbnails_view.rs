@@ -32,7 +32,7 @@ use crate::texts;
 use crate::thumbnail_worker::{self, Worker};
 use crate::thumbnails::{
     Document, Slot, Status, THUMBNAIL_HEIGHT, THUMBNAIL_WIDTH, Thumbnails, columns_for, fit_within,
-    row_count, thumbnail_size,
+    grid_offset, row_count, thumbnail_size,
 };
 
 /// The space between a thumbnail and the page number under it, in egui
@@ -157,21 +157,12 @@ impl ThumbnailsView {
     /// Brings the textures in line with the state: one for every page it
     /// holds as drawn, and none for any other.
     fn update_textures(&mut self, ctx: &egui::Context, state: &mut Thumbnails) {
-        // First the textures of pages that the state no longer holds: the
-        // file was replaced, or the page was forgotten to save memory.
-        //
-        // The order matters. A page number means another page once
-        // another file is open, and its old texture must not survive. It
-        // cannot: pages are only asked for by `grid` below, which runs
-        // after this, so between closing a file and the first drawn page
-        // of the next one there is always a frame that finds the state
-        // empty here.
-        self.textures
-            .retain(|page, _| state.slot(*page) == Some(&Slot::Ready));
-
-        // Then the images that arrived. Each is handed to egui once and
-        // dropped: from here on the texture is the only copy.
-        for (page, image) in state.take_fresh() {
+        // Which textures go and which are made is the state's rule
+        // (`update_pictures`, tested there): a texture must never be
+        // shown for a page it was not made from. What is left here is how
+        // an image becomes a texture. Each image is handed to egui once
+        // and dropped: from then on the texture is the only copy.
+        state.update_pictures(&mut self.textures, |page, image| {
             let size = [image.width as usize, image.height as usize];
             // The core draws on opaque white paper, so "unmultiplied"
             // and "premultiplied" alpha are the same bytes here.
@@ -180,10 +171,8 @@ impl ThumbnailsView {
             // picture when it is shown at a size that is not exactly its
             // own, which happens when a page does not have the shape of
             // the box.
-            let texture =
-                ctx.load_texture(format!("page-{page}"), pixels, egui::TextureOptions::LINEAR);
-            self.textures.insert(page, texture);
-        }
+            ctx.load_texture(format!("page-{page}"), pixels, egui::TextureOptions::LINEAR)
+        });
     }
 
     /// The grid of thumbnails of a document of `pages` pages.
@@ -197,41 +186,45 @@ impl ThumbnailsView {
         let columns = columns_for(ui.available_width(), cell.x, spacing.x);
         let rows = row_count(pages, columns);
         let size = thumbnail_size(ui.pixels_per_point());
-        // The columns are centred in the room there is.
-        let used = columns as f32 * (cell.x + spacing.x) - spacing.x;
-        let left = ((ui.available_width() - used) / 2.0).max(0.0);
+        // The grid stands in the middle of the room there is.
+        let left = grid_offset(ui.available_width(), cell.x, spacing.x, columns, pages);
+
+        let mut area = egui::ScrollArea::vertical().auto_shrink(false);
+        // egui remembers how far a scroll area was scrolled by the place
+        // the area has in the window, and this one is in the same place
+        // for every file. Left alone, a file that was just chosen would
+        // open at the row the file before it was left at. The state says
+        // when a file is new, once, and that frame starts at the top.
+        if state.take_scroll_to_top() {
+            area = area.vertical_scroll_offset(0.0);
+        }
 
         // `show_rows` is a scroll area for a long list of rows of one
         // height: it works out which rows are on screen and only asks
         // for those to be drawn, so a document of a thousand pages draws
         // a dozen thumbnails per frame.
-        egui::ScrollArea::vertical().auto_shrink(false).show_rows(
-            ui,
-            cell.y,
-            rows,
-            |ui, visible| {
-                // This is where the state learns what is on screen, and
-                // asks the worker for the pages that are missing.
-                state.show_rows(visible.clone(), columns, size);
+        area.show_rows(ui, cell.y, rows, |ui, visible| {
+            // This is where the state learns what is on screen, and asks
+            // the worker for the pages that are missing.
+            state.show_rows(visible.clone(), columns, size);
 
-                // The top left corner of the first row on screen.
-                let origin = ui.max_rect().left_top() + egui::vec2(left, 0.0);
-                for row in visible.clone() {
-                    for column in 0..columns {
-                        let page = row * columns + column + 1;
-                        if page > pages {
-                            break;
-                        }
-                        let offset = egui::vec2(
-                            column as f32 * (cell.x + spacing.x),
-                            (row - visible.start) as f32 * (cell.y + spacing.y),
-                        );
-                        let rect = egui::Rect::from_min_size(origin + offset, cell);
-                        self.cell(ui, rect, page, state.slot(page));
+            // The top left corner of the first row on screen.
+            let origin = ui.max_rect().left_top() + egui::vec2(left, 0.0);
+            for row in visible.clone() {
+                for column in 0..columns {
+                    let page = row * columns + column + 1;
+                    if page > pages {
+                        break;
                     }
+                    let offset = egui::vec2(
+                        column as f32 * (cell.x + spacing.x),
+                        (row - visible.start) as f32 * (cell.y + spacing.y),
+                    );
+                    let rect = egui::Rect::from_min_size(origin + offset, cell);
+                    self.cell(ui, rect, page, state.slot(page));
                 }
-            },
-        );
+            }
+        });
     }
 
     /// One cell of the grid, drawn in `rect`: the thumbnail of `page`, or

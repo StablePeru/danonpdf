@@ -15,7 +15,7 @@
 //! - Out, to the worker: the requests that follow from all of that
 //!   ([`Thumbnails::take_requests`]).
 //! - Out, to the drawing code: the images that arrived
-//!   ([`Thumbnails::take_fresh`]), and everything it needs to draw.
+//!   ([`Thumbnails::update_pictures`]), and everything it needs to draw.
 //!
 //! Nothing here reads a file, calls PDFium or knows egui, and no method
 //! waits for anything. That is what keeps the window answering, and it is
@@ -23,9 +23,10 @@
 //! drawing code and the worker, one step at a time.
 //!
 //! As in the other views, the drawing is elsewhere (`thumbnails_view.rs`),
-//! and so are the textures: an image handed out by `take_fresh` belongs to
-//! the drawing code from then on, and this state only remembers that the
-//! page has one.
+//! and so are the textures: an image handed out by `update_pictures`
+//! belongs to the drawing code from then on, and this state only remembers
+//! that the page has one. Which textures the drawing code may keep is
+//! still decided here, in that same method.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -37,6 +38,7 @@ use std::sync::mpsc::TryRecvError;
 use danonpdf_core::{PageImage, RenderError, error_chain};
 
 use crate::drops::{OneOfSeveral, one_pdf_of};
+use crate::paths::display_name;
 use crate::texts;
 use crate::thumbnail_worker::{Generation, Reply, Request, ThumbnailSize, Worker};
 
@@ -103,6 +105,10 @@ pub struct Thumbnails {
     status: Status,
     /// The requests that the worker has not been given yet.
     outbox: Vec<Request>,
+    /// Raised when a file is chosen, and lowered by the drawing code when
+    /// it has shown the grid from its first row: see
+    /// [`Thumbnails::take_scroll_to_top`].
+    scroll_to_top: bool,
 }
 
 /// The file the view shows, and how far it has got.
@@ -124,8 +130,9 @@ pub enum Document {
 pub enum Slot {
     /// The worker was asked to draw it, in the current generation.
     Requested,
-    /// It was drawn. The image went out through
-    /// [`Thumbnails::take_fresh`]; the drawing code holds its texture.
+    /// It was drawn. The image goes out through
+    /// [`Thumbnails::update_pictures`]; the drawing code holds its texture
+    /// from then on.
     Ready,
     /// The worker could not draw it. `reason` is the error and its causes,
     /// in the core's words. The page keeps its place in the grid.
@@ -235,6 +242,9 @@ impl Thumbnails {
         // the worker skips what is still in its queue for the old file,
         // and whatever it is drawing right now is ignored when it arrives.
         self.close();
+        // A new file is looked at from its first page, wherever the one
+        // before it was left.
+        self.scroll_to_top = true;
         self.outbox.push(Request::Open {
             generation: self.generation.current(),
             // The path is needed twice, here and in the document below.
@@ -398,10 +408,62 @@ impl Thumbnails {
     }
 
     /// Hands over the images that arrived since the last call, each with
-    /// its page number, and keeps none. The drawing code turns each into a
-    /// texture, which is the only copy of the picture from then on.
+    /// its page number, and keeps none. The drawing code does not call
+    /// this itself: it gets the images through [`Self::update_pictures`],
+    /// which also says which of its pictures must go.
     pub fn take_fresh(&mut self) -> Vec<(usize, PageImage)> {
         std::mem::take(&mut self.fresh)
+    }
+
+    /// Brings `pictures` in line with this state: when it returns, there
+    /// is a picture for every page that is drawn, made from the image of
+    /// that page, and none for any other page.
+    ///
+    /// `pictures` is whatever the drawing code shows a page with, by page
+    /// number, and `make` turns the image of a page into one. In the
+    /// window a picture is a texture of egui; here it is any type `P`, so
+    /// the rule is tested without a window.
+    ///
+    /// Two steps:
+    ///
+    /// 1. The picture of every page that this state does not hold as
+    ///    drawn is dropped: the file was replaced, the page was forgotten
+    ///    to save memory, or it is being drawn again at another size.
+    /// 2. Every image that arrived since the last call becomes the
+    ///    picture of its page, in the place of any picture that was there.
+    ///
+    /// A page number means another page once another file is open, and
+    /// the picture of the old page must never be shown for the new one. It
+    /// cannot be, however many frames go by between two calls and whatever
+    /// happened in them. A page is only held as drawn from the moment its
+    /// image arrives, and that image waits here until this is called. So
+    /// for a page that is drawn now, either its image is handed over in
+    /// this very call, and step 2 replaces what was there, or it was
+    /// handed over in an earlier one and the page has been drawn ever
+    /// since, and the picture made then is still the right one.
+    pub fn update_pictures<P>(
+        &mut self,
+        pictures: &mut BTreeMap<usize, P>,
+        mut make: impl FnMut(usize, PageImage) -> P,
+    ) {
+        pictures.retain(|page, _| self.slots.get(page) == Some(&Slot::Ready));
+        for (page, image) in self.take_fresh() {
+            pictures.insert(page, make(page, image));
+        }
+    }
+
+    /// Whether the grid must be shown from its first row, whatever row it
+    /// was left at. True once after every file that is chosen: the call
+    /// that says so also lowers the flag.
+    ///
+    /// The drawing code asks when it draws the grid, which is not the
+    /// frame in which the file was chosen (the file is still being opened
+    /// then), so the answer has to wait here until it is asked for. The
+    /// reason it is needed at all is in the drawing code: the scroll area
+    /// remembers how far it was scrolled, and knows nothing about files.
+    pub fn take_scroll_to_top(&mut self) -> bool {
+        // `take` on a `bool` leaves `false` behind.
+        std::mem::take(&mut self.scroll_to_top)
     }
 
     /// Records that the worker thread has ended by itself. Whatever was
@@ -490,7 +552,7 @@ impl Thumbnails {
             Err(error) => {
                 self.status = Status::NotAccepted {
                     file: path,
-                    message: error_chain(&error),
+                    message: reason(error),
                 };
             }
         }
@@ -513,7 +575,7 @@ impl Thumbnails {
             }
             Err(error) => {
                 *slot = Slot::Failed {
-                    reason: error_chain(&error),
+                    reason: reason(error),
                 };
             }
         }
@@ -606,6 +668,39 @@ fn is_about_the_library(error: &RenderError) -> bool {
     }
 }
 
+/// Why the file on screen could not be opened, or one of its pages could
+/// not be drawn: `error` and its causes, in the core's words, with the
+/// file named the way this window names files.
+///
+/// The core names a file by the whole path it was given. That is what the
+/// command-line tool wants, since a script has to find the file again. In
+/// the window it is too much: every other line names a file by its name
+/// alone and shows the path when the name is hovered, and a path makes a
+/// status line run over three lines of a narrow window.
+///
+/// The sentence is not written again here, where it could drift from the
+/// core's. The error is given the shorter path and the core words it, as
+/// it words every other reason the window shows.
+fn reason(error: RenderError) -> String {
+    let name_only = |path: PathBuf| PathBuf::from(display_name(&path));
+    let error = match error {
+        RenderError::Read { path, source } => RenderError::Read {
+            path: name_only(path),
+            source,
+        },
+        RenderError::NotPdf { path } => RenderError::NotPdf {
+            path: name_only(path),
+        },
+        // Every other kind either names no file, or names one that is not
+        // the file on screen and is wanted in full: the library that is
+        // missing, which the user has to go and find. (`is_about_the_library`
+        // above is the function that has no such arm, so that a new kind
+        // of error is looked at before this crate builds again.)
+        other => other,
+    };
+    error_chain(&error)
+}
+
 /// The pages that `rows` hold, in a grid of `columns` thumbnails per row
 /// and a document of `pages` pages. `None` when they hold none: the rows
 /// are empty, or past the end of the document.
@@ -651,6 +746,34 @@ pub fn columns_for(available_width: f32, cell_width: f32, spacing: f32) -> usize
     // room makes it a plain division.
     let columns = ((available_width + spacing) / (cell_width + spacing)).floor();
     (columns as usize).max(1)
+}
+
+/// How far from the left edge of `available_width` the grid starts, so
+/// that it stands in the middle of the room there is.
+///
+/// What is centred is the widest row. In a document of several rows that
+/// is `columns` cells, and a last row that is not full starts under the
+/// first column like the rows above it, as text does. A document with
+/// fewer pages than one row holds has no full row: its few thumbnails are
+/// centred by themselves, instead of standing on the left of a window
+/// that is mostly empty.
+///
+/// Never negative: in a window narrower than one thumbnail the grid
+/// starts at the edge.
+pub fn grid_offset(
+    available_width: f32,
+    cell_width: f32,
+    spacing: f32,
+    columns: usize,
+    pages: usize,
+) -> f32 {
+    // The cells of the widest row, and never none.
+    let cells = columns.min(pages).max(1);
+    // N cells take N widths and N - 1 spacings.
+    let used = cells as f32 * (cell_width + spacing) - spacing;
+    // `max` with a number that is "not a number" gives the other one, so
+    // a width that makes no sense gives 0.
+    ((available_width - used) / 2.0).max(0.0)
 }
 
 /// How many rows `pages` thumbnails take at `columns` per row. The last

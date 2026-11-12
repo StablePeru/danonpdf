@@ -406,8 +406,9 @@ mod tests {
     }
 
     /// An app that shows the Pages view, in which `docs/report.pdf` is
-    /// open and has eight pages, four of them on screen and asked for. The
-    /// test plays the worker: there is no thread.
+    /// open and has eight pages. Four of them are on screen, and all
+    /// eight are asked for: the row below the one on screen is asked for
+    /// too, as the margin. The test plays the worker: there is no thread.
     fn app_with_pages_open() -> DanonPdfApp {
         let mut app = DanonPdfApp {
             view: View::Pages,

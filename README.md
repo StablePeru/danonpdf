@@ -43,13 +43,13 @@ Both run while the window waits, like a merge. What the new files do not keep is
 Click **Pages** at the top of the window.
 
 1. Drag one PDF onto the window, or click **Choose PDF…**.
-2. Its pages appear as thumbnails, each with its page number under it, as many per row as the window is wide. Scroll to see the rest.
+2. Its pages appear as thumbnails, each with its page number under it, as many per row as the window is wide, in the middle of the window. Scroll to see the rest.
 
 The view only shows pages: it changes no file and writes none.
 
 - **The window keeps answering.** The pages are drawn by a second thread, so the window can be scrolled, resized and switched to another view while they arrive. An empty box with `…` is a page that has not been drawn yet.
 - **Only what is on screen is drawn.** The rows in the window, and one more above and below, are asked for; scrolling far away drops what was still waiting and draws what is on screen now. A long document opens as fast as a short one.
-- **One file at a time.** A new file replaces the one shown. Of several files dropped together, the first PDF is used, and the line at the bottom says how many were left out.
+- **One file at a time.** A new file replaces the one shown, and is shown from its first page. Of several files dropped together, the first PDF is used, and the line at the bottom says how many were left out.
 - **A file that cannot be shown leaves the view empty.** A file that needs a password, is damaged, is not a PDF or has no pages is not shown, and the line at the bottom says why. Unlike in the Split view, the file shown before is closed as soon as another one is chosen.
 - **A page that cannot be drawn keeps its place.** Its box says so, with the reason, and the other pages are shown as usual.
 - **It needs `pdfium.dll` next to `danonpdf.exe`.** The pages are drawn by the PDFium library (see [PDFium](#pdfium)), which is loaded the first time a file is opened in this view. If the file is missing or does not load, the line at the bottom names the file that was looked for. Merge and Split do not need it and work without it.
@@ -155,6 +155,7 @@ docker compose run --rm build cargo run --release -p danonpdf-cli -- merge --out
 - **At most 120 thumbnails are kept.** In a long document, the thumbnails farthest from what is on screen are forgotten, and drawn again when you scroll back to them. That keeps the memory they take at about 17 MiB on an ordinary screen and about 68 MiB on one with twice the pixels. A window so large that it shows more than 120 at once keeps all the ones it shows.
 - **A file is read again for every thumbnail.** Each one opens the file, draws a page and closes it. In the build container, 300 thumbnails of a small document took about 0.15 seconds, and about 0.6 seconds for the same pages in a file with 30,000 more objects, three quarters of that spent on opening. A file changed by another program while it is shown gives thumbnails of the new content, or a page that says it cannot be drawn.
 - **Only the Pages view has a second thread.** Merging, extracting and splitting still run while the window waits: with very big files the window may stop answering for a few seconds.
+- **Closing waits for the page being drawn, for two seconds at most.** A page that is being drawn when the window is closed is finished first, which takes a moment. If it does not finish (the file is on a network share that stopped answering, say), the program closes anyway after two seconds. Nothing can be lost by that: the Pages view only reads files.
 
 ## Why local
 

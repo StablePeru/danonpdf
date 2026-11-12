@@ -1,6 +1,6 @@
 //! Tests for the worker thread. Every one of them starts a real thread and
 //! talks to it through the real channels; what is fake, in all but the
-//! last two, is the engine, so the tests need no PDFium and decide by
+//! last three, is the engine, so the tests need no PDFium and decide by
 //! themselves when a page is "drawn".
 //!
 //! # No test here sleeps
@@ -15,6 +15,11 @@
 //! drawn". Every wait has a time limit ([`GUARD`]), but only so that a
 //! broken worker fails the test instead of hanging the run: no test passes
 //! because time went by.
+//!
+//! One test does let a wait run out, because that wait is what it tests:
+//! closing must not wait for a call that does not return. The engine is
+//! stopped for certain when it does (the test holds the only thing that
+//! lets it go on), so the result is the same however long the wait is.
 
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
@@ -549,16 +554,111 @@ fn dropping_the_worker_ends_its_thread() {
     // Dropping moved the generation on, so whatever was still in the
     // queue was skipped and not drawn.
     assert_eq!(generation.current(), 1);
-    // The thread owned the engine, and the engine a sender of this
-    // channel. With the thread gone, every sender is gone, and that is
-    // what `Disconnected` says: `Timeout` would mean one is still alive.
-    let ended = loop {
+    assert_eq!(how_the_calls_ended(&calls), RecvTimeoutError::Disconnected);
+}
+
+/// Waits until nothing more can come through `calls`, and says why.
+///
+/// The thread owns the engine, and the engine a sender of this channel.
+/// With the thread gone, every sender is gone, and that is what
+/// `Disconnected` says: `Timeout` would mean that one is still alive.
+fn how_the_calls_ended(calls: &Receiver<Call>) -> RecvTimeoutError {
+    loop {
         match calls.recv_timeout(GUARD) {
             Ok(_) => continue,
             Err(error) => break error,
         }
-    };
-    assert_eq!(ended, RecvTimeoutError::Disconnected);
+    }
+}
+
+#[test]
+fn closing_waits_for_the_page_that_is_being_drawn() {
+    let mut harness = Harness::gated();
+    harness.draw(1);
+    // The worker is inside the engine, on page 1.
+    assert_eq!(
+        harness.next_call(),
+        Call::Draw {
+            page: 1,
+            width: 160
+        }
+    );
+    // The page may finish: the message waits at the gate, so the engine
+    // goes on whether it looks before the window closes or after.
+    harness.let_one_page_through();
+
+    // `GUARD` is not what the test waits for: a thread that never ended
+    // would make this `LeftRunning`, half a minute later.
+    let ending = harness.worker.end(GUARD);
+
+    assert_eq!(ending, Ending::Ended);
+    // Ended means gone: no sender of this channel is left, already now.
+    assert_eq!(harness.calls.try_recv(), Err(TryRecvError::Disconnected));
+}
+
+#[test]
+fn closing_does_not_wait_for_a_call_that_does_not_return() {
+    let mut harness = Harness::gated();
+    harness.draw(1);
+    // The worker is inside the engine, and stays there: only this test
+    // can let it go on, and it does not until the window has closed. A
+    // file on a network share that stopped answering looks like this.
+    assert_eq!(
+        harness.next_call(),
+        Call::Draw {
+            page: 1,
+            width: 160
+        }
+    );
+
+    // The wait runs out, whatever its length. It is short so that the
+    // test is.
+    let ending = harness.worker.end(Duration::from_millis(20));
+
+    // The window is free to go on closing, and the thread was told to
+    // stop all the same: nothing more will be asked of it.
+    assert_eq!(ending, Ending::LeftRunning);
+    assert_eq!(harness.generation.current(), 1);
+
+    // The call returns at last. Nobody waits for the thread, and it ends
+    // by itself: the request channel is closed.
+    harness.let_one_page_through();
+    assert_eq!(
+        how_the_calls_ended(&harness.calls),
+        RecvTimeoutError::Disconnected
+    );
+}
+
+#[test]
+fn closing_a_worker_whose_thread_panicked_does_not_wait_either() {
+    let mut worker = Worker::spawn(
+        Generation::default(),
+        // `FakeEngine` only names the type of engine that this loader
+        // would give if it did not panic first.
+        || -> Result<FakeEngine, RenderError> {
+            panic!("the loader broke (this panic is part of a test)");
+        },
+        Box::new(|| {}),
+    )
+    .unwrap();
+    worker
+        .send(Request::Open {
+            generation: 0,
+            path: PathBuf::from("a.pdf"),
+        })
+        .unwrap();
+    // The request reached the thread and made it panic: its end of the
+    // reply channel is gone, and no reply came through it.
+    assert!(matches!(
+        worker.replies.recv_timeout(GUARD),
+        Err(RecvTimeoutError::Disconnected)
+    ));
+
+    // A thread that panicked sends no last word. The window still learns
+    // that it ended, and does not sit out the wait.
+    assert_eq!(worker.end(GUARD), Ending::Ended);
+    // Asked again, as `drop` will: there is nothing left to end.
+    assert_eq!(worker.end(GUARD), Ending::Ended);
 }
 
 #[test]
@@ -576,7 +676,7 @@ fn what_crosses_the_channels_is_send() {
 
 // The real engine
 //
-// These two use PDFium itself: the build image unpacks it and points
+// These three use PDFium itself: the build image unpacks it and points
 // `DANONPDF_PDFIUM_DIR` at it. A process can load PDFium once, and every
 // test of this crate shares one process, so no test here may load another
 // library file: asking for a folder without one is refused before
@@ -636,6 +736,65 @@ fn pdfium_counts_and_draws_through_the_worker() {
     assert_eq!((image.width, image.height), (134, 225));
     assert_eq!(image.rgba.len(), 134 * 225 * 4);
     // An empty page is white paper, fully opaque.
+    assert!(image.rgba.iter().all(|byte| *byte == 255));
+}
+
+#[test]
+fn a_second_worker_draws_with_the_pdfium_that_is_already_loaded() {
+    // What the window does after a worker thread died: it starts another
+    // one, in the same process, which asks for the engine again. A
+    // process can load PDFium once, so this only works because the core
+    // hands the loaded engine to whoever asks for the same library file.
+    let scratch = ScratchDir::new("worker-pdfium-twice");
+    let path = scratch.pdf("report.pdf", 3);
+
+    // The first worker has PDFium loaded (unless another test of this
+    // process already did), uses it and ends.
+    let (mut first, woken) = real_worker(load_pdfium);
+    first
+        .send(Request::Open {
+            generation: 0,
+            path: path.clone(),
+        })
+        .unwrap();
+    woken.recv_timeout(GUARD).unwrap();
+    let opened = first.try_recv().unwrap();
+    assert!(
+        matches!(opened, Reply::Opened { result: Ok(3), .. }),
+        "unexpected reply: {opened:?}"
+    );
+    assert_eq!(first.end(GUARD), Ending::Ended);
+    drop(first);
+
+    // The second one starts with no engine of its own: its thread calls
+    // `load_pdfium` again, with the library in memory since the first.
+    let (second, woken) = real_worker(load_pdfium);
+    second
+        .send(Request::Open {
+            generation: 0,
+            path: path.clone(),
+        })
+        .unwrap();
+    woken.recv_timeout(GUARD).unwrap();
+    let opened = second.try_recv().unwrap();
+    second
+        .send(Request::Page {
+            generation: 0,
+            path,
+            page: NonZeroUsize::new(2).unwrap(),
+            size: SIZE,
+        })
+        .unwrap();
+    woken.recv_timeout(GUARD).unwrap();
+    let (_, page, image) = drawn(second.try_recv().unwrap());
+
+    assert!(
+        matches!(opened, Reply::Opened { result: Ok(3), .. }),
+        "unexpected reply: {opened:?}"
+    );
+    // The same page, at the same size, as the first test of this group.
+    assert_eq!(page, 2);
+    assert_eq!((image.width, image.height), (134, 225));
     assert!(image.rgba.iter().all(|byte| *byte == 255));
 }
 

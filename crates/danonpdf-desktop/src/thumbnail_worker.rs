@@ -34,8 +34,9 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, SendError, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SendError, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use danonpdf_core::{
     MAX_RENDER_HEIGHT, MAX_RENDER_WIDTH, PageImage, RenderError, Renderer, default_library_folder,
@@ -239,19 +240,53 @@ pub enum Reply {
 /// something tied to this thread, and refuses to move it (E0277).
 pub type Wake = Box<dyn Fn() + Send>;
 
+/// How long closing the window waits for the worker thread to end.
+///
+/// An idle worker ends at once, and one that is drawing a page ends when
+/// the page is done. A slow page takes PDFium about a second (see the top
+/// of this file), so two seconds cover an ordinary close with room to
+/// spare, and the thread is gone before the program is. Only a call that
+/// has stalled lasts longer (a file on a network share that stopped
+/// answering, a page PDFium cannot get through), and for that one the
+/// wait must end: a program that stays behind, out of sight, after its
+/// window was closed is worse than a thread cut short. Two seconds is
+/// also about as long as a window that was told to close can stay on
+/// screen before it looks stuck.
+pub const CLOSE_WAIT: Duration = Duration::from_secs(2);
+
+/// How [`Worker::end`] left the worker thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// The thread has ended: nothing of it is left.
+    Ended,
+    /// The thread was still inside a call when the wait ran out, and was
+    /// left to finish by itself.
+    LeftRunning,
+}
+
 /// The window's handle on the worker thread: the two ends of the channels
 /// that the window holds, and the thread itself.
 ///
 /// Dropping it ends the thread: see the `Drop` at the bottom of this file.
 pub struct Worker {
-    /// `Option` only so that `drop` can let go of the sender before it
-    /// waits for the thread. It is `Some` for the whole life of the value.
+    /// `Option` only so that `end` can let go of the sender before it
+    /// waits for the thread. It is `Some` until then.
     requests: Option<Sender<Request>>,
     replies: Receiver<Reply>,
     generation: Generation,
     /// `Option` for the same reason: `JoinHandle::join` takes the handle
-    /// by value, and `drop` only has `&mut self`.
+    /// by value, and `end` only has `&mut self`.
     thread: Option<JoinHandle<()>>,
+    /// How the window learns that the thread has ended, without waiting
+    /// for it longer than it wants to. Nothing is ever sent through this
+    /// channel. The thread holds the sending end for as long as it runs,
+    /// and a channel reports that its last sender is gone: that report is
+    /// the signal. It comes however the thread ends, by a panic too, since
+    /// a panic drops everything the thread owned on its way out.
+    ///
+    /// `JoinHandle::join` cannot do this: it waits for as long as it
+    /// takes, with no way to give up.
+    ended: Receiver<()>,
 }
 
 impl Worker {
@@ -290,6 +325,9 @@ impl Worker {
         // thread gets the other two.
         let (request_sender, request_receiver) = mpsc::channel();
         let (reply_sender, reply_receiver) = mpsc::channel();
+        // A third one, only to learn that the thread has ended: see the
+        // field `ended`.
+        let (ended_sender, ended) = mpsc::channel();
         let for_the_thread = generation.clone();
 
         // `move` gives the closure everything it names: both channel ends,
@@ -310,6 +348,13 @@ impl Worker {
         let thread = thread::Builder::new()
             .name("thumbnails".to_owned())
             .spawn(move || {
+                // Never used, only owned. A local is dropped when its
+                // block ends, and `run` has returned by then, having let
+                // go of the engine and of everything else it was given. So
+                // this sender is the last thing the thread drops, and the
+                // window reads "this sender is gone" as "the thread has
+                // ended".
+                let _until_the_thread_ends = ended_sender;
                 run(
                     request_receiver,
                     reply_sender,
@@ -324,6 +369,7 @@ impl Worker {
             replies: reply_receiver,
             generation,
             thread: Some(thread),
+            ended,
         })
     }
 
@@ -335,7 +381,8 @@ impl Worker {
     pub fn send(&self, request: Request) -> Result<(), SendError<Request>> {
         match &self.requests {
             Some(requests) => requests.send(request),
-            // Not reached: the sender is only taken out in `drop`.
+            // Not reached: the sender is only taken out in `end`, which
+            // only `drop` calls.
             None => Err(SendError(request)),
         }
     }
@@ -360,11 +407,9 @@ impl Worker {
     }
 }
 
-impl Drop for Worker {
-    /// Ends the worker thread and waits until it is gone.
-    ///
-    /// The window drops its `Worker` when the program closes (eframe drops
-    /// the app, and the `Worker` with it). Three steps, in this order:
+impl Worker {
+    /// Ends the worker thread, and waits for it to be gone for no longer
+    /// than `wait`. Three steps, in this order:
     ///
     /// 1. The generation moves on, so every request still in the queue is
     ///    skipped instead of drawn. A channel hands over everything that
@@ -373,26 +418,81 @@ impl Drop for Worker {
     /// 2. The sender is dropped. That is the signal: with no sender left,
     ///    the `recv` the worker waits in returns an error, and its loop
     ///    ends. No "please stop" message is needed.
-    /// 3. `join` waits for the thread to return. If it is in the middle of
-    ///    a page, that is one page at most.
+    /// 3. The window waits until the thread has ended (see the field
+    ///    `ended`), or until `wait` is over.
     ///
-    /// Waiting is the careful choice. When `main` returns, the system
-    /// starts taking the program apart, its libraries included, without
-    /// asking the other threads first. The worker only reads files, so
-    /// nothing of the user's could be damaged by being cut off, but a
+    /// # Why it waits
+    ///
+    /// When `main` returns, the system starts taking the program apart,
+    /// its libraries included, without asking the other threads first. A
     /// thread that is inside PDFium at that moment is a way for a program
-    /// to crash on its way out, and waiting for one page avoids the
-    /// question.
-    fn drop(&mut self) {
+    /// to crash on its way out, and waiting for the page it is drawing
+    /// avoids the question.
+    ///
+    /// # Why it does not wait for ever
+    ///
+    /// Step 1 only cancels what is in the queue. A call into PDFium that
+    /// has started cannot be interrupted, and it reads a file: on a
+    /// network share that stopped answering, that read may not come back
+    /// for minutes. Waiting for it would keep the program running with its
+    /// window already closed.
+    ///
+    /// So after `wait` the thread is let go: its handle is dropped, which
+    /// leaves the thread running with nobody waiting for it. That is safe:
+    ///
+    /// - The thread borrows nothing from the window. It owns its ends of
+    ///   the channels, its own owner of the generation and the engine, so
+    ///   nothing it uses goes away while it runs.
+    /// - It only reads files. It holds none open for writing, so no file
+    ///   of the user's can be left half written, whenever the thread is
+    ///   cut off.
+    /// - If the program is closing, the system ends the thread with it.
+    ///   The crash on the way out that waiting avoids is possible again
+    ///   for this one stalled call; there is no work left for it to lose.
+    /// - If the program goes on (a test, or a worker that the window
+    ///   replaces), the thread ends by itself when its call returns: the
+    ///   window is not listening for the reply, the request channel is
+    ///   closed, and its loop ends.
+    fn end(&mut self, wait: Duration) -> Ending {
+        // `take` leaves `None` behind and hands over the handle. No handle
+        // means that the thread was already waited for.
+        let Some(thread) = self.thread.take() else {
+            return Ending::Ended;
+        };
         self.generation.advance();
-        // `take` leaves `None` behind and hands over the sender, which is
-        // dropped at the end of this statement.
+        // The sender is dropped at the end of this statement.
         drop(self.requests.take());
-        if let Some(thread) = self.thread.take() {
-            // `join` returns an error if the thread panicked. There is
-            // nothing left to do about that here.
-            let _ = thread.join();
+
+        // `recv_timeout` waits for a message, for the last sender to go
+        // away or for the time to run out, whichever comes first. No
+        // message is ever sent, so `Ok` is listed only because the type
+        // has it.
+        match self.ended.recv_timeout(wait) {
+            // The thread dropped its sender, which is the last thing it
+            // does: `join` returns at once, and is only called so that
+            // nothing of the thread is left behind. It gives an error if
+            // the thread panicked, and there is nothing left to do about
+            // that here.
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => {
+                let _ = thread.join();
+                Ending::Ended
+            }
+            // Still inside a call. `thread` is dropped here, unjoined:
+            // that is all it takes to let a thread go.
+            Err(RecvTimeoutError::Timeout) => Ending::LeftRunning,
         }
+    }
+}
+
+impl Drop for Worker {
+    /// Ends the worker thread, waiting for it for [`CLOSE_WAIT`] at most.
+    ///
+    /// The window drops its `Worker` when the program closes (eframe drops
+    /// the app, and the `Worker` with it), and when it finds that the
+    /// thread has ended by itself. [`Worker::end`] says what happens and
+    /// why.
+    fn drop(&mut self) {
+        self.end(CLOSE_WAIT);
     }
 }
 
