@@ -2,7 +2,9 @@
 
 DanonPDF will be a free, fast desktop tool for everyday PDF work: merge, split, rotate, reorder and delete pages with thumbnails, compress, and turn images into PDF. Windows first, Linux later. It is part of DanonAA.
 
-> **Status:** early work. The app can merge PDF files, from the window or from the command line. The command line can also count the pages of a file, extract pages and split a file; the window cannot yet. The other tools do not exist.
+> **Status:** early work. The app can merge PDF files, extract pages from one and split one into several files, from the window or from the command line. The other tools do not exist.
+
+The window has two views, **Merge** and **Split**, chosen with the two buttons at the top. It opens on Merge. Files dropped on the window go to the view that is shown, and each view keeps what it holds while the other one is open.
 
 ## Merging PDFs
 
@@ -11,6 +13,30 @@ DanonPDF will be a free, fast desktop tool for everyday PDF work: merge, split, 
 3. Click **Merge…** and choose where to save. It proposes `merged.pdf` next to the first file, or `merged (2).pdf` and so on when that name is already in the list. It refuses to write over one of the files being merged (a hard link to one of them is not recognised). If you type a name without `.pdf`, it adds `.pdf`, and it does not merge when a file with that name already exists: choose that file in the dialog to replace it. The line at the bottom then says how many pages were written, or why the merge failed.
 
 The merge runs while the window waits, so with very big files the window may stop answering for a few seconds. What a merged file does not keep is listed under [Limits](#limits).
+
+## Extracting pages and splitting
+
+Click **Split** at the top of the window.
+
+1. Drag one PDF onto the window, or click **Choose PDF…**. Its name and its number of pages appear in the box.
+2. Choose **Extract pages** or **Split into files**, and fill in the one field below.
+3. Click **Extract…** or **Split…** and choose where to save. The line at the bottom says what was written, or why nothing was.
+
+| Mode | The field | What the button writes |
+| --- | --- | --- |
+| **Extract pages** | The pages to take, such as `1-3,7,10-` (see [Choosing pages](#choosing-pages)). The line under it says how many pages that selects, or what is wrong with it. | One new PDF with those pages, in the order typed. It proposes `report-pages.pdf` next to `report.pdf`, or `report-pages (2).pdf` and so on when that name is taken. |
+| **Split into files** | How many pages go into each file: 1 gives one file per page. The line under it shows the result, such as `5 pages into 3 files: report-001.pdf to report-003.pdf`. | Those files, into the folder you choose. The last one may have fewer pages. |
+
+What the view does and does not do:
+
+- **One file at a time.** A new file replaces the chosen one; what you typed stays and is checked against the new file. Of several files dropped together, the first PDF is used, and the line at the bottom says how many were left out.
+- **Only files it can work on are accepted.** A file that needs a password, is damaged or is not a PDF is not chosen, and the line says why.
+- **The chosen file is only read.** Neither button writes over it (a hard link to it is not recognised).
+- **Extract** treats the name you choose as Merge does: it adds `.pdf` to a name without it, and then does not write when a file with that name already exists.
+- **Split** checks every name before it writes anything. If one already exists in the folder, it writes nothing and names the first one: choose another folder, or an empty one. The window never replaces the files of an earlier split; `danonpdf-cli split --force` does.
+- If a split cannot save a file halfway through, it stops, keeps the files already written and says how many there are.
+
+Both run while the window waits, like a merge. What the new files do not keep is listed under [Limits](#limits).
 
 ## Command line
 
@@ -136,8 +162,12 @@ It prints how many pages it wrote, or why it could not merge.
 | `crates/danonpdf-cli` | The command-line tool (`danonpdf-cli`): arguments in, a line or a JSON object out. |
 | `crates/danonpdf-cli/tests/cli.rs` | Runs the real program and checks its output and exit codes. |
 | `crates/danonpdf-desktop` | The desktop app (`danonpdf`), built with [egui](https://github.com/emilk/egui). |
-| `crates/danonpdf-desktop/src/merge_list.rs` | The merge window's state and rules, tested without a window. |
-| `crates/danonpdf-desktop/src/app.rs` | Draws the window and turns clicks and dropped files into calls on that state. |
+| `crates/danonpdf-desktop/src/merge_list.rs` | The Merge view's state and rules, tested without a window. |
+| `crates/danonpdf-desktop/src/split_form.rs` | The Split view's state and rules, tested without a window. |
+| `crates/danonpdf-desktop/src/paths.rs` | The rules both views share about names: what to propose, and what may be written where. |
+| `crates/danonpdf-desktop/src/app.rs` | Draws the view switch and the Merge view, and turns clicks and dropped files into calls on the state. |
+| `crates/danonpdf-desktop/src/split_view.rs` | Draws the Split view. |
+| `crates/danonpdf-desktop/src/dialogs.rs`, `drops.rs` | The system's file dialogs, and files dropped on the window. |
 | `crates/danonpdf-desktop/src/texts.rs` | Every text the user sees, ready for a translation. |
 | `scripts/build-windows.sh` | Builds `dist/danonpdf.exe` and `dist/danonpdf-cli.exe`. |
 | `AGENTS.md` | How an AI agent uses `danonpdf-cli` and works on this repository. |

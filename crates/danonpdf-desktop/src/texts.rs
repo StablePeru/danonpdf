@@ -4,10 +4,11 @@
 //! A translation (Basque first) then means one more module like this one,
 //! not a hunt through the drawing code.
 //!
-//! One exception for now: when a merge fails, the reason comes from the core
-//! (`PdfError` and the errors behind it) in English. Translating those
-//! means matching on each kind of error here, which can wait until there is
-//! a second language.
+//! One exception for now: when an operation fails, or a page selection is
+//! not accepted, the reason comes from the core (`PdfError`,
+//! `PageSyntaxError` and the errors behind them) in English. Translating
+//! those means matching on each kind of error here, which can wait until
+//! there is a second language.
 
 use std::fmt::Display;
 
@@ -50,7 +51,14 @@ pub fn numbered_name(name: &str, attempt: usize) -> String {
     }
 }
 
-// Toolbar
+// The view switch
+
+pub const VIEW_MERGE: &str = "Merge";
+pub const VIEW_MERGE_HINT: &str = "Join several PDFs into one";
+pub const VIEW_SPLIT: &str = "Split";
+pub const VIEW_SPLIT_HINT: &str = "Take pages out of one PDF, or cut it into several files";
+
+// Merge view: toolbar
 
 pub const ADD_BUTTON: &str = "Add PDFs…";
 pub const ADD_HINT: &str = "Choose PDF files to add at the end of the list";
@@ -60,7 +68,7 @@ pub const MERGE_BUTTON: &str = "Merge…";
 pub const MERGE_HINT: &str = "Join every file in the list, in this order, into a new PDF";
 pub const MERGE_NEEDS_TWO: &str = "Add at least two PDFs to merge them";
 
-// The list
+// Merge view: the list
 
 pub const DROP_HINT: &str = "Drop PDF files here, or use \"Add PDFs…\".";
 pub const DROP_NOW: &str = "Drop the files to add them to the list.";
@@ -75,10 +83,13 @@ pub const REMOVE_HINT: &str = "Take this file out of the list. The file itself i
 
 pub const ADD_DIALOG_TITLE: &str = "Add PDFs";
 pub const SAVE_DIALOG_TITLE: &str = "Save the merged PDF";
-/// The name of the file type filter in both dialogs.
+pub const CHOOSE_DIALOG_TITLE: &str = "Choose a PDF";
+pub const EXTRACT_DIALOG_TITLE: &str = "Save the extracted pages";
+pub const SPLIT_DIALOG_TITLE: &str = "Choose a folder for the new files";
+/// The name of the file type filter in every file dialog.
 pub const PDF_FILTER: &str = "PDF files";
 
-// Status line
+// Merge view: status line
 
 /// How many files the list holds, shown while there is nothing else to say.
 pub fn files_in_list(count: usize) -> String {
@@ -148,7 +159,59 @@ pub fn exists_after_adding_extension(output_name: &str) -> String {
     )
 }
 
+// Split view: choosing the file
+
+pub const CHOOSE_BUTTON: &str = "Choose PDF…";
+pub const CHOOSE_HINT: &str =
+    "Choose the PDF to take pages from. It replaces the one chosen before.";
+pub const SPLIT_DROP_HINT: &str = "Drop a PDF file here, or use \"Choose PDF…\".";
+pub const SPLIT_DROP_NOW: &str = "Drop the file to use it here.";
+/// Shown on the controls that need a file while none is chosen.
+pub const NEEDS_FILE: &str = "Choose a PDF first";
+
+/// How long the chosen file is, shown next to its name.
+pub fn page_count(pages: usize) -> String {
+    match pages {
+        1 => "1 page".to_owned(),
+        _ => format!("{pages} pages"),
+    }
+}
+
+// Split view: the two modes
+
+pub const MODE_EXTRACT: &str = "Extract pages";
+pub const MODE_EXTRACT_HINT: &str = "Copy some of the pages into one new PDF";
+pub const MODE_SPLIT: &str = "Split into files";
+pub const MODE_SPLIT_HINT: &str = "Write all the pages into several new PDFs";
+
 // Split view: extracting
+
+pub const PAGES_LABEL: &str = "Pages:";
+/// The example shown inside the pages field while it is empty. It is the
+/// page syntax of the core, the one `danonpdf-cli --pages` takes.
+pub const PAGES_EXAMPLE: &str = "1-3,7,10-";
+pub const PAGES_HINT: &str = "Pages separated by commas. 7 is one page, 1-3 is pages 1 to 3, \
+     and 10- is page 10 and every page after it. \
+     They are written in the order given.";
+/// Shown under the pages field while there is nothing to check.
+pub const PAGES_PROMPT: &str = "Type the pages to extract, for example 1-3,7,10-";
+pub const EXTRACT_BUTTON: &str = "Extract…";
+pub const EXTRACT_HINT: &str = "Copy the selected pages, in the order typed, into a new PDF";
+pub const EXTRACT_NEEDS_PAGES: &str = "Type which pages to extract first";
+
+/// Shown under the pages field when the text selects pages of the file.
+pub fn pages_selected(pages: usize) -> String {
+    match pages {
+        1 => "1 page selected.".to_owned(),
+        _ => format!("{pages} pages selected."),
+    }
+}
+
+/// Shown under the pages field when the text cannot be used. `reason` is
+/// the core's own message.
+pub fn pages_invalid(reason: &str) -> String {
+    format!("Cannot use these pages: {reason}")
+}
 
 /// The file name the save dialog proposes for an extraction from a file
 /// whose name, without its extension, is `input_stem`: "report-pages.pdf"
@@ -156,6 +219,140 @@ pub fn exists_after_adding_extension(output_name: &str) -> String {
 /// [`numbered_name`]).
 pub fn extract_output_name(input_stem: &str) -> String {
     format!("{input_stem}-pages.pdf")
+}
+
+// Split view: splitting
+
+pub const PAGES_PER_FILE_LABEL: &str = "Pages per file:";
+pub const PAGES_PER_FILE_HINT: &str =
+    "How many pages go into each new file. The last file may have fewer.";
+pub const SPLIT_BUTTON: &str = "Split…";
+pub const SPLIT_HINT: &str = "Choose a folder and write the new files into it";
+
+/// What a split would write: how many files, and the names of the first
+/// and the last one. With one file there is no "to".
+pub fn split_preview(pages: usize, files: usize, first: &str, last: &str) -> String {
+    let pages = page_count(pages);
+    match files {
+        1 => format!("{pages} into 1 file: {first}"),
+        _ => format!("{pages} into {files} files: {first} to {last}"),
+    }
+}
+
+// Split view: status line
+
+pub const NO_FILE_CHOSEN: &str = "No PDF chosen yet.";
+
+/// Shown while a file is chosen and there is nothing else to say.
+/// `file_name` is the chosen file, without its folder.
+pub fn file_chosen(file_name: &str) -> String {
+    format!("{file_name} is only read: its pages go to new files.")
+}
+
+/// A file was chosen out of several. `file_name` is the one in use.
+///
+/// The view only reports this when at least one count is above zero, but
+/// this function does not rely on it: with both at zero it still returns a
+/// whole sentence.
+pub fn left_out(file_name: &str, other_pdfs: usize, not_pdf: usize) -> String {
+    let mut message = format!("Using {file_name}.");
+    // Each sentence is added only when it has something to count, so the
+    // line never mentions a count of zero.
+    match other_pdfs {
+        0 => {}
+        1 => message.push_str(" Left out 1 other PDF: this view takes one file at a time."),
+        _ => message.push_str(&format!(
+            " Left out {other_pdfs} other PDFs: this view takes one file at a time."
+        )),
+    }
+    if not_pdf > 0 {
+        // The same words as in the Merge view, for the same thing.
+        message.push(' ');
+        message.push_str(&skipped(not_pdf, 0));
+    }
+    message
+}
+
+/// A file could not be chosen. `reason` is the error and its causes.
+pub fn not_accepted(file_name: &str, reason: &str) -> String {
+    format!("Cannot use {file_name}: {reason}")
+}
+
+/// An extraction worked. `output_name` is the file name, without its folder.
+pub fn extracted(pages: usize, output_name: &str) -> String {
+    match pages {
+        1 => format!("Extracted 1 page into {output_name}."),
+        _ => format!("Extracted {pages} pages into {output_name}."),
+    }
+}
+
+/// A split worked. `folder` is where the files are, as the user chose it.
+pub fn split_done(pages: usize, files: usize, folder: &str) -> String {
+    let pages = page_count(pages);
+    match files {
+        1 => format!("Split {pages} into 1 file in {folder}."),
+        _ => format!("Split {pages} into {files} files in {folder}."),
+    }
+}
+
+/// An extraction failed. `reason` is the error and its causes.
+pub fn extract_failed(reason: &str) -> String {
+    format!("Could not extract: {reason}")
+}
+
+/// A split failed before it wrote anything. `reason` is the error and its
+/// causes.
+pub fn split_failed(reason: &str) -> String {
+    format!("Could not split: {reason}")
+}
+
+/// An extraction was refused because the chosen name is the file being
+/// read. `output_name` is the file name, without its folder.
+pub fn extract_onto_input(output_name: &str) -> String {
+    format!(
+        "Not extracted: {output_name} is the file the pages come from. \
+         Choose another name, so that it is not replaced."
+    )
+}
+
+/// A split was refused because one of its files would be the file being
+/// read (only a link can cause that). `output_name` is that file's name.
+pub fn split_onto_input(output_name: &str) -> String {
+    format!(
+        "Not split: {output_name} in that folder is the file the pages come from. \
+         Choose another folder."
+    )
+}
+
+/// An extraction was refused because ".pdf" was added to the typed name and
+/// a file with that name already exists. `output_name` is the name with
+/// ".pdf", without its folder.
+pub fn extract_exists_after_adding_extension(output_name: &str) -> String {
+    format!(
+        "Not extracted: {output_name} already exists. \
+         Choose it in the dialog if you want to replace it."
+    )
+}
+
+/// A split was refused because one of its names is in use. `output_name`
+/// is the first such name. The window never replaces the files of a split,
+/// so the advice is another folder.
+pub fn split_name_taken(output_name: &str) -> String {
+    format!(
+        "Not split: {output_name} already exists in that folder, and nothing was written. \
+         Choose another folder, or an empty one."
+    )
+}
+
+/// A split stopped after some of its files. `reason` is the error and its
+/// causes; `folder` is where the finished files are.
+pub fn split_stopped(written: usize, parts: usize, folder: &str, reason: &str) -> String {
+    let kept = match written {
+        0 => "No file was written.".to_owned(),
+        1 => format!("The 1 file already in {folder} is complete and was kept."),
+        _ => format!("The {written} files already in {folder} are complete and were kept."),
+    };
+    format!("The split stopped after {written} of {parts} files: {reason}. {kept}")
 }
 
 #[cfg(test)]
@@ -231,12 +428,111 @@ mod tests {
     // Split view
 
     #[test]
+    fn page_counts_use_singular_for_one_page() {
+        assert_eq!(page_count(1), "1 page");
+        assert_eq!(page_count(12), "12 pages");
+        assert_eq!(pages_selected(1), "1 page selected.");
+        assert_eq!(pages_selected(4), "4 pages selected.");
+        assert_eq!(extracted(1, "a.pdf"), "Extracted 1 page into a.pdf.");
+        assert_eq!(extracted(3, "a.pdf"), "Extracted 3 pages into a.pdf.");
+    }
+
+    #[test]
     fn extract_output_name_adds_pages_to_the_input_name() {
         assert_eq!(extract_output_name("report"), "report-pages.pdf");
         // Numbered like every other proposal.
         assert_eq!(
             numbered_name(&extract_output_name("report"), 2),
             "report-pages (2).pdf"
+        );
+    }
+
+    #[test]
+    fn split_preview_names_one_file_or_the_first_and_the_last() {
+        assert_eq!(
+            split_preview(5, 3, "report-001.pdf", "report-003.pdf"),
+            "5 pages into 3 files: report-001.pdf to report-003.pdf"
+        );
+        assert_eq!(
+            split_preview(5, 1, "report-001.pdf", "report-001.pdf"),
+            "5 pages into 1 file: report-001.pdf"
+        );
+        assert_eq!(
+            split_preview(1, 1, "report-001.pdf", "report-001.pdf"),
+            "1 page into 1 file: report-001.pdf"
+        );
+    }
+
+    #[test]
+    fn left_out_names_only_the_parts_that_apply() {
+        assert_eq!(
+            left_out("a.pdf", 1, 0),
+            "Using a.pdf. Left out 1 other PDF: this view takes one file at a time."
+        );
+        assert_eq!(
+            left_out("a.pdf", 2, 1),
+            "Using a.pdf. Left out 2 other PDFs: this view takes one file at a time. \
+             Skipped 1 file that is not a PDF."
+        );
+        assert_eq!(
+            left_out("a.pdf", 0, 3),
+            "Using a.pdf. Skipped 3 files that are not PDFs."
+        );
+        assert_eq!(left_out("a.pdf", 0, 0), "Using a.pdf.");
+    }
+
+    #[test]
+    fn split_done_says_how_many_files_and_where() {
+        assert_eq!(
+            split_done(5, 3, "parts"),
+            "Split 5 pages into 3 files in parts."
+        );
+        assert_eq!(
+            split_done(1, 1, "parts"),
+            "Split 1 page into 1 file in parts."
+        );
+    }
+
+    #[test]
+    fn split_stopped_says_how_far_it_got_and_what_was_kept() {
+        assert_eq!(
+            split_stopped(2, 5, "parts", "cannot save x.pdf: disk full"),
+            "The split stopped after 2 of 5 files: cannot save x.pdf: disk full. \
+             The 2 files already in parts are complete and were kept."
+        );
+        assert_eq!(
+            split_stopped(1, 5, "parts", "boom"),
+            "The split stopped after 1 of 5 files: boom. \
+             The 1 file already in parts is complete and was kept."
+        );
+        assert_eq!(
+            split_stopped(0, 5, "parts", "cannot create the folder parts: denied"),
+            "The split stopped after 0 of 5 files: cannot create the folder parts: denied. \
+             No file was written."
+        );
+    }
+
+    #[test]
+    fn refusals_of_the_split_view_name_the_file() {
+        assert_eq!(
+            extract_onto_input("report.pdf"),
+            "Not extracted: report.pdf is the file the pages come from. \
+             Choose another name, so that it is not replaced."
+        );
+        assert_eq!(
+            extract_exists_after_adding_extension("out.pdf"),
+            "Not extracted: out.pdf already exists. \
+             Choose it in the dialog if you want to replace it."
+        );
+        assert_eq!(
+            split_name_taken("report-002.pdf"),
+            "Not split: report-002.pdf already exists in that folder, and nothing was written. \
+             Choose another folder, or an empty one."
+        );
+        assert_eq!(
+            split_onto_input("report-002.pdf"),
+            "Not split: report-002.pdf in that folder is the file the pages come from. \
+             Choose another folder."
         );
     }
 }
