@@ -4,11 +4,11 @@
 //! A translation (Basque first) then means one more module like this one,
 //! not a hunt through the drawing code.
 //!
-//! One exception for now: when an operation fails, or a page selection is
-//! not accepted, the reason comes from the core (`PdfError`,
-//! `PageSyntaxError` and the errors behind them) in English. Translating
-//! those means matching on each kind of error here, which can wait until
-//! there is a second language.
+//! One exception for now: when an operation fails, a page selection is not
+//! accepted or a page cannot be shown, the reason comes from the core
+//! (`PdfError`, `PageSyntaxError`, `RenderError` and the errors behind
+//! them) in English. Translating those means matching on each kind of
+//! error here, which can wait until there is a second language.
 
 use std::fmt::Display;
 use std::path::Path;
@@ -77,6 +77,8 @@ pub const VIEW_MERGE: &str = "Merge";
 pub const VIEW_MERGE_HINT: &str = "Join several PDFs into one";
 pub const VIEW_SPLIT: &str = "Split";
 pub const VIEW_SPLIT_HINT: &str = "Take pages out of one PDF, or cut it into several files";
+pub const VIEW_PAGES: &str = "Pages";
+pub const VIEW_PAGES_HINT: &str = "See the pages of one PDF as small pictures";
 
 // Merge view: toolbar
 
@@ -386,9 +388,104 @@ pub fn split_stopped(written: usize, parts: usize, folder: &str, reason: &str) -
     )
 }
 
+// Pages view: choosing the file
+//
+// The button is the one of the Split view ([`CHOOSE_BUTTON`]): it does the
+// same thing here, so it has the same words.
+
+pub const PAGES_CHOOSE_HINT: &str = "Choose the PDF to look at. It replaces the one shown before.";
+pub const PAGES_DROP_HINT: &str = "Drop a PDF file here, or use \"Choose PDF…\", to see its pages.";
+pub const PAGES_DROP_NOW: &str = "Drop the file to see its pages.";
+
+/// Shown in the middle of the view between choosing a file and knowing how
+/// many pages it has. `file_name` is the file, without its folder.
+pub fn opening(file_name: &str) -> String {
+    format!("Opening {file_name}…")
+}
+
+// Pages view: the thumbnails
+
+/// The text under a thumbnail.
+pub fn page_label(page: usize) -> String {
+    format!("Page {page}")
+}
+
+/// Shown where a thumbnail will be, until its page has been drawn.
+pub const PAGE_WAITING: &str = "…";
+/// Shown where a thumbnail would be when its page could not be drawn. The
+/// reason, in the core's words, goes under it.
+pub const PAGE_NOT_DRAWN: &str = "This page cannot be shown";
+
+// Pages view: status line
+
+/// Shown while a file is open and there is nothing else to say.
+/// `file_name` is the file, without its folder.
+pub fn pages_shown(file_name: &str, pages: usize) -> String {
+    format!("Showing {file_name}, {}.", page_count(pages))
+}
+
+/// Why a file that opened is not shown. It follows "Cannot use
+/// report.pdf: " (see [`not_accepted`]), so it reads like the reasons that
+/// come from the core.
+pub const NO_PAGES: &str = "it has no pages";
+
+/// The library that draws pages is missing or does not load. `reason` is
+/// the error and its causes, and names the file that was looked for.
+///
+/// The second sentence is there because the first one sounds worse than it
+/// is: nothing else in the program needs that library.
+pub fn no_engine(reason: &str) -> String {
+    format!("Cannot show pages: {reason}. Merge and Split work without it.")
+}
+
+/// The thread that draws pages ended by itself, which only a bug can
+/// cause. Choosing a file starts a new one.
+pub const WORKER_STOPPED: &str =
+    "The part of DanonPDF that draws pages stopped working. Choose the PDF again to restart it.";
+
+/// The thread that draws pages could not be started. `reason` is what the
+/// system said.
+pub fn worker_not_started(reason: &str) -> String {
+    format!("Cannot show pages: the program could not start drawing them ({reason}).")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Pages view
+
+    #[test]
+    fn the_pages_view_names_the_file_and_counts_its_pages() {
+        assert_eq!(opening("report.pdf"), "Opening report.pdf…");
+        assert_eq!(pages_shown("report.pdf", 1), "Showing report.pdf, 1 page.");
+        assert_eq!(
+            pages_shown("report.pdf", 12),
+            "Showing report.pdf, 12 pages."
+        );
+        assert_eq!(page_label(7), "Page 7");
+    }
+
+    #[test]
+    fn a_file_without_pages_reads_like_a_reason_from_the_core() {
+        assert_eq!(
+            not_accepted("empty.pdf", NO_PAGES),
+            "Cannot use empty.pdf: it has no pages"
+        );
+    }
+
+    #[test]
+    fn a_missing_library_says_what_still_works() {
+        assert_eq!(
+            no_engine("the PDFium library is missing: app/pdfium.dll"),
+            "Cannot show pages: the PDFium library is missing: app/pdfium.dll. \
+             Merge and Split work without it."
+        );
+        assert_eq!(
+            worker_not_started("no more threads"),
+            "Cannot show pages: the program could not start drawing them (no more threads)."
+        );
+    }
 
     #[test]
     fn skipped_names_only_the_parts_that_apply() {

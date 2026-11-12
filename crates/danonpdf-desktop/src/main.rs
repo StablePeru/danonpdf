@@ -15,6 +15,9 @@ mod split_view;
 #[cfg(test)]
 mod test_support;
 mod texts;
+mod thumbnail_worker;
+mod thumbnails;
+mod thumbnails_view;
 
 use eframe::egui;
 

@@ -16,8 +16,9 @@ RUN apt-get update \
 # PDFium, the library that draws PDF pages. DanonPDF does not compile it
 # (that takes Chromium's build system and a long time): the core loads a
 # prebuilt library at the moment a page is drawn, libpdfium.so on Linux and
-# pdfium.dll on Windows. What draws pages is `danonpdf-cli render` and the
-# tests; the other commands and the desktop app never load the library.
+# pdfium.dll on Windows. What draws pages is `danonpdf-cli render`, the
+# Pages view of the desktop app and the tests; the other commands and the
+# other views never load the library.
 # The binaries come from https://github.com/bblanchon/pdfium-binaries, one
 # release per PDFium build. The build number must be the one that the
 # pdfium-render crate is told to bind to (its `pdfium_8125` feature in

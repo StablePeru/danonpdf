@@ -5,9 +5,10 @@
 #   dist/danonpdf-cli.exe  the command-line tool (a console program)
 #   dist/pdfium.dll        PDFium, prebuilt (not compiled here: see Dockerfile)
 #   dist/licenses/pdfium/  the licence texts that must travel with that DLL
-# `danonpdf-cli.exe render` loads pdfium.dll from the folder it is in, which
-# is why the DLL sits next to the programs. Nothing else loads it: the other
-# commands work without it, and the desktop app does not draw pages.
+# The Pages view of danonpdf.exe and `danonpdf-cli.exe render` load
+# pdfium.dll from the folder they are in, which is why the DLL sits next to
+# the programs. Nothing else loads it: the other views and the other
+# commands work without it.
 # Meant to run inside the build container:
 #   docker compose run --rm build bash scripts/build-windows.sh
 #

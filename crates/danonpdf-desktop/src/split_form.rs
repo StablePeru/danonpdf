@@ -17,10 +17,11 @@ use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
 use danonpdf_core::{
-    PageSelection, PdfError, SplitError, error_chain, extract_file, is_pdf_path, name_is_taken,
-    page_count, plan_split, same_file, split_output_paths,
+    PageSelection, PdfError, SplitError, error_chain, extract_file, name_is_taken, page_count,
+    plan_split, same_file, split_output_paths,
 };
 
+use crate::drops::{OneOfSeveral, one_pdf_of};
 use crate::paths::{
     OutputRefusal, SaveSuggestion, display_name, first_free_path, output_from_dialog,
 };
@@ -247,23 +248,18 @@ impl SplitForm {
     /// Reading the file happens on the thread that draws the window, like
     /// the operations themselves: see [`Self::extract_into`].
     pub fn choose(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
-        let mut first_pdf = None;
-        let mut other_pdfs = 0;
-        let mut not_pdf = 0;
-        for path in paths {
-            if !is_pdf_path(&path) {
-                not_pdf += 1;
-            } else if first_pdf.is_none() {
-                // `path` is moved into the `Option`: no copy of the path.
-                first_pdf = Some(path);
-            } else {
-                other_pdfs += 1;
-            }
-        }
+        // Which file, and how many are left out: the rule is shared with
+        // the Pages view, so it lives in `drops.rs`. Taking the struct
+        // apart in a `let` gives each field a name of its own here.
+        let OneOfSeveral {
+            pdf,
+            other_pdfs,
+            not_pdf,
+        } = one_pdf_of(paths);
 
         // `let ... else` takes the path out of the `Option`, or runs the
         // `else` block, which must leave the function.
-        let Some(path) = first_pdf else {
+        let Some(path) = pdf else {
             // No path at all (an empty drop) is nothing to report.
             if not_pdf > 0 {
                 self.status = Status::NoPdf { not_pdf };

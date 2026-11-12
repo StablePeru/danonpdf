@@ -2,9 +2,9 @@
 
 DanonPDF will be a free, fast desktop tool for everyday PDF work: merge, split, rotate, reorder and delete pages with thumbnails, compress, and turn images into PDF. Windows first, Linux later. It is part of DanonAA.
 
-> **Status:** early work. The app can merge PDF files, extract pages from one and split one into several files, from the window or from the command line. The command line can also draw a page as a PNG image; the window does not show pages yet. The other tools do not exist.
+> **Status:** early work. The app can merge PDF files, extract pages from one and split one into several files, from the window or from the command line. The window can show the pages of a PDF as thumbnails, and the command line can draw a page as a PNG image. Pages cannot be rotated, reordered or deleted yet, and the other tools do not exist.
 
-The window has two views, **Merge** and **Split**, chosen with the two buttons at the top. It opens on Merge. Files dropped on the window go to the view that is shown, and each view keeps what it holds while the other one is open.
+The window has three views, **Merge**, **Split** and **Pages**, chosen with the three buttons at the top. It opens on Merge. Files dropped on the window go to the view that is shown, and each view keeps what it holds while another one is open.
 
 ## Merging PDFs
 
@@ -37,6 +37,24 @@ What the view does and does not do:
 - If a split cannot save a file halfway through, it stops, keeps the files already written and says how many there are. To try again, choose another folder or empty that one first: the files that were kept have the names the new split would use.
 
 Both run while the window waits, like a merge. What the new files do not keep is listed under [Limits](#limits).
+
+## Looking at the pages
+
+Click **Pages** at the top of the window.
+
+1. Drag one PDF onto the window, or click **Choose PDF…**.
+2. Its pages appear as thumbnails, each with its page number under it, as many per row as the window is wide. Scroll to see the rest.
+
+The view only shows pages: it changes no file and writes none.
+
+- **The window keeps answering.** The pages are drawn by a second thread, so the window can be scrolled, resized and switched to another view while they arrive. An empty box with `…` is a page that has not been drawn yet.
+- **Only what is on screen is drawn.** The rows in the window, and one more above and below, are asked for; scrolling far away drops what was still waiting and draws what is on screen now. A long document opens as fast as a short one.
+- **One file at a time.** A new file replaces the one shown. Of several files dropped together, the first PDF is used, and the line at the bottom says how many were left out.
+- **A file that cannot be shown leaves the view empty.** A file that needs a password, is damaged, is not a PDF or has no pages is not shown, and the line at the bottom says why. Unlike in the Split view, the file shown before is closed as soon as another one is chosen.
+- **A page that cannot be drawn keeps its place.** Its box says so, with the reason, and the other pages are shown as usual.
+- **It needs `pdfium.dll` next to `danonpdf.exe`.** The pages are drawn by the PDFium library (see [PDFium](#pdfium)), which is loaded the first time a file is opened in this view. If the file is missing or does not load, the line at the bottom names the file that was looked for. Merge and Split do not need it and work without it.
+
+What the view does not do is listed under [Limits](#limits).
 
 ## Command line
 
@@ -131,7 +149,12 @@ docker compose run --rm build cargo run --release -p danonpdf-cli -- merge --out
   The reason is time. For 300 one-page files in the build container: about 5 seconds when waiting for the disk after each file, 1 to 2.5 seconds when waiting once at the end, and about 0.02 seconds without waiting.
 - **Password-protected files are refused.** A file that opens without a password is read like any other.
 - **An image has a largest size.** `render` draws a page at most 4096 pixels wide and 8192 pixels high, one page per run.
-- **A damaged file can be judged two ways.** `render` reads a file with PDFium; every other operation reads it with another library (lopdf). They agree on sound files, and can disagree on damaged ones. A file whose end is cut off is still counted by `info` and refused by `render`. A file whose catalog names no page tree is damaged for `info`, and a document without pages for `render`. So "it can be merged or split" and "it can be drawn" are two separate questions.
+- **A damaged file can be judged two ways.** `render` and the Pages view read a file with PDFium; every other operation reads it with another library (lopdf). They agree on sound files, and can disagree on damaged ones. A file whose end is cut off is still counted by `info` and refused by `render`. A file whose catalog names no page tree is damaged for `info`, and a document without pages for `render`. So "it can be merged or split" and "it can be drawn" are two separate questions, and a file that the Split view accepts may be one that the Pages view cannot show, or the other way round.
+- **The Pages view only shows.** Pages cannot be selected, rotated, reordered or deleted there yet, and a thumbnail cannot be opened larger.
+- **Thumbnails have one size.** A thumbnail is 160 points wide (160 pixels on an ordinary screen, more on a sharper one), in a box 226 points high. A page of another shape is fitted into that box.
+- **At most 120 thumbnails are kept.** In a long document, the thumbnails farthest from what is on screen are forgotten, and drawn again when you scroll back to them. That keeps the memory they take at about 17 MiB on an ordinary screen and about 68 MiB on one with twice the pixels. A window so large that it shows more than 120 at once keeps all the ones it shows.
+- **A file is read again for every thumbnail.** Each one opens the file, draws a page and closes it. In the build container, 300 thumbnails of a small document took about 0.15 seconds, and about 0.6 seconds for the same pages in a file with 30,000 more objects, three quarters of that spent on opening. A file changed by another program while it is shown gives thumbnails of the new content, or a page that says it cannot be drawn.
+- **Only the Pages view has a second thread.** Merging, extracting and splitting still run while the window waits: with very big files the window may stop answering for a few seconds.
 
 ## Why local
 
@@ -153,7 +176,7 @@ docker compose run --rm build cargo test --workspace
 docker compose run --rm build bash scripts/build-windows.sh
 ```
 
-The last command cross-compiles both Windows programs and leaves them in `dist/`: `danonpdf.exe`, the desktop app, and `danonpdf-cli.exe`, the command-line tool. Next to them it puts `pdfium.dll` and, in `dist/licenses/pdfium/`, the licence texts that go with it (see [PDFium](#pdfium)). Keep the three files and that folder together: `danonpdf-cli.exe render` looks for `pdfium.dll` in its own folder, and the DLL must not travel without its licences. Run the programs on Windows: a window does not open from inside a container.
+The last command cross-compiles both Windows programs and leaves them in `dist/`: `danonpdf.exe`, the desktop app, and `danonpdf-cli.exe`, the command-line tool. Next to them it puts `pdfium.dll` and, in `dist/licenses/pdfium/`, the licence texts that go with it (see [PDFium](#pdfium)). Keep the three files and that folder together: the Pages view of `danonpdf.exe` and `danonpdf-cli.exe render` look for `pdfium.dll` in their own folder, and the DLL must not travel without its licences. Run the programs on Windows: a window does not open from inside a container.
 
 Downloaded crates and build output are kept in Docker volumes, not in the checkout. On Linux, build the image with your own user so the files the container writes stay yours:
 
@@ -169,14 +192,15 @@ docker compose down --volumes
 
 ## PDFium
 
-To draw a page, DanonPDF uses [PDFium](https://pdfium.googlesource.com/pdfium/), the PDF library of Chromium. It is the only part that is not Rust and not compiled here: it is a prebuilt library that a program loads when it draws a page, `pdfium.dll` on Windows and `libpdfium.so` on Linux. `danonpdf-cli render` draws a page with it and writes the image as a PNG file. The window does not draw pages yet, and the other commands of `danonpdf-cli` never load it: they work without the library.
+To draw a page, DanonPDF uses [PDFium](https://pdfium.googlesource.com/pdfium/), the PDF library of Chromium. It is the only part that is not Rust and not compiled here: it is a prebuilt library that a program loads when it draws a page, `pdfium.dll` on Windows and `libpdfium.so` on Linux. Two things draw pages with it: the Pages view of the window, for its thumbnails, and `danonpdf-cli render`, which writes the image as a PNG file. The Merge and Split views and the other commands of `danonpdf-cli` never load it: they work without the library.
 
 - **Where it comes from.** The [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) project, which builds PDFium and publishes one release per build.
 - **Which one.** The release tagged `chromium/8125`: `pdfium-win-x64.tgz` and `pdfium-linux-x64.tgz`.
 - **When it is downloaded.** Only while the build image is made (`docker compose build`), never by the programs. The `Dockerfile` pins the SHA-256 of both archives, and a download that does not match stops the build.
 - **Where it ends up.** In the image, under `/opt/pdfium/`. `scripts/build-windows.sh` copies the DLL to `dist/pdfium.dll`.
 - **Where a program looks for it.** In its own folder, and nowhere else: not in the current folder and not along `PATH`. The environment variable `DANONPDF_PDFIUM_DIR` names another folder when it is set and not empty; a relative folder is taken from the current folder. The build image sets the variable, so the tests and `cargo run` find `libpdfium.so`.
-- **When it is not there.** `danonpdf-cli render` fails with the error code `renderer_unavailable` and names the file it looked for. Nothing is downloaded and nothing else is tried.
+- **When it is loaded.** By the window, the first time a file is opened in the Pages view, on the thread that draws the thumbnails; by `danonpdf-cli`, when `render` runs. A window that never shows the Pages view never loads it.
+- **When it is not there.** `danonpdf-cli render` fails with the error code `renderer_unavailable` and names the file it looked for. The Pages view shows nothing and names that file in the line at the bottom; putting the file in place and choosing the PDF again is enough, without restarting. Nothing is downloaded and nothing else is tried.
 - **Trust.** Loading a library runs its code inside the program. Point `DANONPDF_PDFIUM_DIR` only at a folder you trust as much as the program itself.
 
 **Licences.** PDFium is under the BSD 3-Clause and Apache 2.0 licences, and it has other libraries built into it (FreeType, ICU, libjpeg-turbo, OpenJPEG, zlib and more), each under its own permissive licence. Those licences ask for their text to go with every copy of the binary, so `dist/licenses/pdfium/` holds all of them as they come in the release: `licenses/pdfium.txt` for PDFium, one file for each library in it, and `LICENSE`, the MIT licence of the pdfium-binaries packaging. `VERSION` there says which build the DLL is. DanonPDF itself stays under GPL-3.0. The BSD 3-Clause and Apache 2.0 licences are both compatible with version 3 of the GPL (Apache 2.0 is not compatible with version 2).
@@ -215,6 +239,9 @@ It prints how many pages it wrote, or why it could not merge.
 | `crates/danonpdf-desktop/src/paths.rs` | The rules both views share about names: what to propose, and what may be written where. |
 | `crates/danonpdf-desktop/src/app.rs` | Draws the view switch and the Merge view, and turns clicks and dropped files into calls on the state. |
 | `crates/danonpdf-desktop/src/split_view.rs` | Draws the Split view. |
+| `crates/danonpdf-desktop/src/thumbnails.rs` | The Pages view's state and rules: which pages are asked for, which are kept. Tested without a window. |
+| `crates/danonpdf-desktop/src/thumbnail_worker.rs` | The thread that draws the thumbnails, and the requests and replies it exchanges with the window. Tested with a fake engine and with PDFium. |
+| `crates/danonpdf-desktop/src/thumbnails_view.rs` | Draws the Pages view, starts the worker thread and holds the textures. |
 | `crates/danonpdf-desktop/src/dialogs.rs`, `drops.rs` | The system's file dialogs, and files dropped on the window. |
 | `crates/danonpdf-desktop/src/texts.rs` | Every text the user sees, ready for a translation. |
 | `Dockerfile`, `compose.yaml` | The build image: the Rust toolchain, the Windows cross-compiler and the pinned PDFium binaries. |

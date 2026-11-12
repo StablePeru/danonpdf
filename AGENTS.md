@@ -213,7 +213,7 @@ docker compose run --rm build cargo test --workspace
 docker compose run --rm build bash scripts/build-windows.sh
 ```
 
-The last command leaves `dist/danonpdf.exe` (the window) and `dist/danonpdf-cli.exe` (this tool) for Windows, with `dist/pdfium.dll` and its licence texts in `dist/licenses/pdfium/`. Keep them together: `render` looks for the DLL next to the program, and the DLL must not be passed on without its licences. Inside the container, run the tool with:
+The last command leaves `dist/danonpdf.exe` (the window) and `dist/danonpdf-cli.exe` (this tool) for Windows, with `dist/pdfium.dll` and its licence texts in `dist/licenses/pdfium/`. Keep them together: `render` looks for the DLL next to the program, and so does the Pages view of the window (the one that shows page thumbnails), and the DLL must not be passed on without its licences. Inside the container, run the tool with:
 
 ```sh
 docker compose run --rm build cargo run --release -p danonpdf-cli -- merge --json --output OUT.pdf A.pdf B.pdf
@@ -221,7 +221,7 @@ docker compose run --rm build cargo run --release -p danonpdf-cli -- merge --jso
 
 The container only sees the checkout, so the PDF files must be inside it. `render` works there too: the build image holds `libpdfium.so` and sets `DANONPDF_PDFIUM_DIR` to its folder.
 
-The tests draw real pages with that library. The ones that are about finding and loading it are programs of their own (`crates/danonpdf-core/tests/`, and every run of the tool in `crates/danonpdf-cli/tests/cli.rs`), because a process can load PDFium only once.
+The tests draw real pages with that library. The ones that are about finding and loading it are programs of their own (`crates/danonpdf-core/tests/`, and every run of the tool in `crates/danonpdf-cli/tests/cli.rs`), because a process can load PDFium only once. The window draws its thumbnails on a thread of its own (`crates/danonpdf-desktop/src/thumbnail_worker.rs`); its tests run that thread with a fake engine, and one of them with PDFium.
 
 ## Working on the code
 

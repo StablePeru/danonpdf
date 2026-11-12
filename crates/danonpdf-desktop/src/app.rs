@@ -1,5 +1,6 @@
-//! The window: the switch between its two views, and the drawing of the
-//! Merge view. The Split view is drawn in `split_view.rs`.
+//! The window: the switch between its three views, and the drawing of the
+//! Merge view. The Split view is drawn in `split_view.rs` and the Pages
+//! view in `thumbnails_view.rs`.
 //!
 //! egui is an immediate-mode GUI. There are no button objects that live on
 //! and fire callbacks later. Instead, [`eframe::App::ui`] runs again for
@@ -8,12 +9,18 @@
 //! are one call: `ui.button("Clear").clicked()`.
 //!
 //! So everything that must survive from one frame to the next lives in the
-//! app struct: which view is shown, a [`MergeList`] and a [`SplitForm`].
-//! The drawing code only reads that state to draw it, and turns clicks and
-//! dropped files into calls on it. The rules themselves (what "move up"
-//! means at the top, which files are accepted, which pages are valid) live
-//! in `merge_list.rs` and `split_form.rs`, where they are tested without a
+//! app struct: which view is shown, a [`MergeList`], a [`SplitForm`] and a
+//! [`Thumbnails`]. The drawing code only reads that state to draw it, and
+//! turns clicks and dropped files into calls on it. The rules themselves
+//! (what "move up" means at the top, which files are accepted, which pages
+//! are valid, which thumbnails are asked for) live in `merge_list.rs`,
+//! `split_form.rs` and `thumbnails.rs`, where they are tested without a
 //! window.
+//!
+//! Merging, extracting and splitting run on the thread that draws the
+//! window, so the window waits for them. The Pages view is the one that
+//! does not wait: its work is done by a second thread (see
+//! `thumbnail_worker.rs`).
 
 use std::path::PathBuf;
 
@@ -26,17 +33,30 @@ use crate::paths::display_name;
 use crate::split_form::SplitForm;
 use crate::split_view;
 use crate::texts;
+use crate::thumbnails::Thumbnails;
+use crate::thumbnails_view::{self, ThumbnailsView};
 
 /// The whole app state. `Default` gives the Merge view with an empty list,
-/// and a Split view with no file chosen.
+/// a Split view with no file chosen and a Pages view with none either.
 ///
-/// Both views keep their state while the other one is shown, so switching
+/// Every view keeps its state while another one is shown, so switching
 /// back and forth loses nothing.
+///
+/// `Default` starts no thread and loads no library: the Pages view starts
+/// its worker the first time a file is chosen in it. That is also what
+/// lets a test build the whole app without a window.
 #[derive(Default)]
 pub struct DanonPdfApp {
     view: View,
     list: MergeList,
     split: SplitForm,
+    thumbnails: Thumbnails,
+    /// What the Pages view owns besides its state: the worker thread and
+    /// the textures. Both are empty until the view is drawn for the first
+    /// time. When the app is dropped, on closing the window, this field
+    /// goes with it, and dropping the worker ends its thread (see `Drop`
+    /// in `thumbnail_worker.rs`).
+    thumbnails_view: ThumbnailsView,
 }
 
 /// Which view the window shows.
@@ -50,6 +70,8 @@ enum View {
     Merge,
     /// Take pages out of one PDF, or cut it into several files.
     Split,
+    /// See the pages of one PDF as thumbnails.
+    Pages,
 }
 
 impl eframe::App for DanonPdfApp {
@@ -89,6 +111,26 @@ impl eframe::App for DanonPdfApp {
                     .show(ui, |ui| split_view::show(ui, frame, &mut self.split));
                 self.split.status() != &drawn
             }
+            View::Pages => {
+                // First of all, what the worker thread sent since the last
+                // frame, so that this frame draws it. Nothing here waits:
+                // a reply that has not arrived is drawn by a later frame,
+                // which the worker asks for when it sends it.
+                self.thumbnails_view
+                    .exchange(ui.ctx(), &mut self.thumbnails);
+                let drawn = self.thumbnails.status().clone();
+                egui::Panel::bottom("status")
+                    .show(ui, |ui| thumbnails_view::status_line(ui, &self.thumbnails));
+                egui::CentralPanel::default().show(ui, |ui| {
+                    self.thumbnails_view.show(ui, frame, &mut self.thumbnails);
+                });
+                // Drawing found out which pages are on screen and asked
+                // for the missing ones: those requests go out now, and
+                // not one frame later.
+                self.thumbnails_view
+                    .exchange(ui.ctx(), &mut self.thumbnails);
+                self.thumbnails.status() != &drawn
+            }
         };
 
         // egui only draws a new frame when something asks for one, usually
@@ -106,18 +148,40 @@ impl eframe::App for DanonPdfApp {
 }
 
 impl DanonPdfApp {
-    /// The two buttons at the top that choose the view.
+    /// The three buttons at the top that choose the view.
     fn view_switch(&mut self, ui: &mut egui::Ui) {
+        // The buttons work on a copy of the view, and the copy goes
+        // through `switch_to`: leaving a view is more than storing another
+        // value.
+        let mut chosen = self.view;
         ui.horizontal(|ui| {
             // `selectable_value` draws a button that looks pressed while
-            // `self.view` equals the value it stands for, and stores that
+            // `chosen` equals the value it stands for, and stores that
             // value when it is clicked. Like every egui button it can be
             // reached with Tab and pressed with Space or Enter.
-            ui.selectable_value(&mut self.view, View::Merge, texts::VIEW_MERGE)
+            ui.selectable_value(&mut chosen, View::Merge, texts::VIEW_MERGE)
                 .on_hover_text(texts::VIEW_MERGE_HINT);
-            ui.selectable_value(&mut self.view, View::Split, texts::VIEW_SPLIT)
+            ui.selectable_value(&mut chosen, View::Split, texts::VIEW_SPLIT)
                 .on_hover_text(texts::VIEW_SPLIT_HINT);
+            ui.selectable_value(&mut chosen, View::Pages, texts::VIEW_PAGES)
+                .on_hover_text(texts::VIEW_PAGES_HINT);
         });
+        self.switch_to(chosen);
+    }
+
+    /// Shows `view` from the next frame on.
+    ///
+    /// The Pages view is told when it is left: it has a thread drawing
+    /// pages for it, and the pages it still waits for are cancelled, so
+    /// that nothing is drawn for a view nobody is looking at. The other
+    /// two views have nothing going on while they are not shown.
+    ///
+    /// It needs no `ui`, so a test can switch views without a window.
+    fn switch_to(&mut self, view: View) {
+        if self.view == View::Pages && view != View::Pages {
+            self.thumbnails.hide();
+        }
+        self.view = view;
     }
 
     /// Asks egui for the files dropped onto the window during this frame
@@ -128,20 +192,24 @@ impl DanonPdfApp {
     }
 
     /// Hands `files` to the view that is shown: the merge list adds them,
-    /// the Split view chooses one of them. The other view is not touched.
+    /// the Split view and the Pages view each choose one of them. The
+    /// other views are not touched.
     ///
     /// It takes plain paths and no `ui`, so a test can drop files on the
     /// app without a window.
     fn take_files(&mut self, files: Vec<PathBuf>) {
         // Nearly every frame brings no file. An empty list must not reach a
-        // view: both treat a call as something the user did, and would wipe
-        // their status line for it.
+        // view: each treats a call as something the user did, and would
+        // wipe its status line for it.
         if files.is_empty() {
             return;
         }
         match self.view {
             View::Merge => self.list.add(files),
             View::Split => self.split.choose(files),
+            // Only notes the file and a request for the worker: the file
+            // is opened on the worker thread, not here.
+            View::Pages => self.thumbnails.choose(files),
         }
     }
 
@@ -309,15 +377,18 @@ impl DanonPdfApp {
     }
 }
 
-// The app struct holds no window and nothing of egui's, so what it decides
-// (which view gets the files that were dropped) is tested like the rest of
-// the state: by calling it.
+// The app struct needs no window to exist: a new one has no thread and no
+// texture yet. So what it decides (which view gets the files that were
+// dropped, what leaving a view does) is tested like the rest of the state:
+// by calling it.
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
     use super::*;
     use crate::test_support::ScratchDir;
+    use crate::thumbnail_worker::Reply;
+    use crate::thumbnails::{self, Document, thumbnail_size};
 
     /// A path inside a folder called `docs`. The merge list only looks at
     /// names when files are added, so nothing has to exist there.
@@ -334,9 +405,126 @@ mod tests {
         }
     }
 
+    /// An app that shows the Pages view, in which `docs/report.pdf` is
+    /// open and has eight pages, four of them on screen and asked for. The
+    /// test plays the worker: there is no thread.
+    fn app_with_pages_open() -> DanonPdfApp {
+        let mut app = DanonPdfApp {
+            view: View::Pages,
+            ..Default::default()
+        };
+        app.take_files(vec![doc("report.pdf")]);
+        app.thumbnails.take_requests();
+        app.thumbnails.receive(Reply::Opened {
+            generation: app.thumbnails.generation().current(),
+            result: Ok(8),
+        });
+        app.thumbnails.show_rows(0..1, 4, thumbnail_size(1.0));
+        app.thumbnails.take_requests();
+        app
+    }
+
     #[test]
     fn the_window_opens_on_the_merge_view() {
         assert_eq!(DanonPdfApp::default().view, View::Merge);
+    }
+
+    #[test]
+    fn a_new_app_has_started_nothing() {
+        // No file, no request for a worker: nothing that would start a
+        // thread or load PDFium before the user asks to see pages.
+        let app = DanonPdfApp::default();
+
+        assert_eq!(app.thumbnails.document(), &Document::None);
+        assert!(!app.thumbnails.has_requests());
+    }
+
+    #[test]
+    fn files_dropped_on_the_pages_view_choose_its_file_and_nothing_else() {
+        let mut app = DanonPdfApp {
+            view: View::Pages,
+            ..Default::default()
+        };
+
+        // The files do not exist: this view reads nothing on this thread.
+        app.take_files(vec![doc("notes.txt"), doc("report.pdf"), doc("other.pdf")]);
+
+        assert_eq!(
+            app.thumbnails.document(),
+            &Document::Opening {
+                path: doc("report.pdf")
+            }
+        );
+        // The same account of what was left out as in the Split view.
+        assert_eq!(
+            app.thumbnails.status(),
+            &thumbnails::Status::LeftOut {
+                other_pdfs: 1,
+                not_pdf: 1
+            }
+        );
+        assert!(app.thumbnails.has_requests());
+        assert!(app.list.files().is_empty());
+        assert_eq!(app.split.file(), None);
+    }
+
+    #[test]
+    fn files_that_are_not_pdfs_dropped_on_the_pages_view_are_counted() {
+        let mut app = app_with_pages_open();
+
+        app.take_files(vec![doc("photo.jpg")]);
+
+        assert_eq!(
+            app.thumbnails.status(),
+            &thumbnails::Status::NoPdf { not_pdf: 1 }
+        );
+        assert_eq!(app.thumbnails.pages(), Some(8));
+    }
+
+    #[test]
+    fn files_dropped_on_another_view_do_not_reach_the_pages_view() {
+        let mut app = DanonPdfApp::default();
+
+        app.take_files(vec![doc("a.pdf")]);
+
+        assert_eq!(app.thumbnails.document(), &Document::None);
+        assert!(!app.thumbnails.has_requests());
+    }
+
+    #[test]
+    fn leaving_the_pages_view_cancels_its_requests_and_keeps_its_file() {
+        let mut app = app_with_pages_open();
+        let before = app.thumbnails.generation().current();
+
+        app.switch_to(View::Merge);
+
+        assert_eq!(app.view, View::Merge);
+        // A new generation: the worker skips the pages it was asked for.
+        assert_eq!(app.thumbnails.generation().current(), before + 1);
+        assert_eq!(app.thumbnails.slot(1), None);
+        assert_eq!(app.thumbnails.pages(), Some(8));
+
+        // Going between the other two views is nothing to the Pages view.
+        app.switch_to(View::Split);
+        assert_eq!(app.thumbnails.generation().current(), before + 1);
+
+        // Back: the file is still there, and its pages are asked for again
+        // by the first frame that draws the grid.
+        app.switch_to(View::Pages);
+        assert_eq!(app.thumbnails.pages(), Some(8));
+    }
+
+    #[test]
+    fn choosing_the_view_that_is_already_shown_cancels_nothing() {
+        // The view switch reports the current view on every frame in which
+        // no button is clicked.
+        let mut app = app_with_pages_open();
+        let before = app.thumbnails.generation().current();
+
+        app.switch_to(View::Pages);
+
+        assert_eq!(app.thumbnails.generation().current(), before);
+        assert_eq!(app.thumbnails.slot(1), Some(&thumbnails::Slot::Requested));
     }
 
     #[test]
