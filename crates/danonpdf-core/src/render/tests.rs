@@ -13,6 +13,7 @@ use std::io::{self, BufReader};
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::thread;
+use std::time::Instant;
 
 use lopdf::{Document, Object, dictionary};
 
@@ -442,6 +443,68 @@ fn a_page_that_is_missing_from_the_file_is_damage() {
     }
 }
 
+// --- Counting pages ----------------------------------------------------------
+
+#[test]
+fn the_pages_of_a_file_are_counted() {
+    let scratch = ScratchDir::new("render-count");
+    let three = scratch.save("three.pdf", with_pages("A", 3));
+    let none = scratch.save("none.pdf", with_pages("A", 0));
+    // Encrypted, and it opens for anyone: counted like any other file.
+    let open = scratch.save("open.pdf", encrypted(with_pages("A", 2), ""));
+    let renderer = renderer();
+
+    assert_eq!(renderer.page_count(&three).unwrap(), 3);
+    // A document without pages is not an error here: it has 0 of them.
+    assert_eq!(renderer.page_count(&none).unwrap(), 0);
+    assert_eq!(renderer.page_count(&open).unwrap(), 2);
+}
+
+#[test]
+fn counting_and_drawing_agree_on_how_many_pages_there_are() {
+    // The count is what a window uses to decide which pages to ask for,
+    // so the last page it names must be one that can be drawn, and the
+    // one after it must not.
+    let scratch = ScratchDir::new("render-count-agrees");
+    let input = scratch.save("a.pdf", with_pages("A", 4));
+    let renderer = renderer();
+
+    let pages = renderer.page_count(&input).unwrap();
+
+    assert!(renderer.render_page(&input, page(pages), 50).is_ok());
+    match renderer.render_page(&input, page(pages + 1), 50) {
+        Err(RenderError::PageOutOfRange { pages: counted, .. }) => assert_eq!(counted, pages),
+        other => panic!("expected a page out of range, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_file_that_cannot_be_drawn_cannot_be_counted_and_for_the_same_reason() {
+    let scratch = ScratchDir::new("render-count-refused");
+    let missing = scratch.file("nothing.pdf");
+    let text = scratch.file("notes.pdf");
+    fs::write(&text, "just some text, not a PDF\n").unwrap();
+    let locked = scratch.save("locked.pdf", encrypted(with_pages("A", 1), "secret"));
+    let renderer = renderer();
+
+    match renderer.page_count(&missing) {
+        Err(RenderError::Read { path, source }) => {
+            assert_eq!(path, missing);
+            assert_eq!(source.kind(), io::ErrorKind::NotFound);
+        }
+        other => panic!("expected a read error, got {other:?}"),
+    }
+    match renderer.page_count(&text) {
+        Err(RenderError::NotPdf { path }) => assert_eq!(path, text),
+        other => panic!("expected not a PDF, got {other:?}"),
+    }
+    let result = renderer.page_count(&locked);
+    assert!(
+        matches!(result, Err(RenderError::Encrypted)),
+        "expected an encrypted error, got {result:?}"
+    );
+}
+
 // --- Where PDFium and the rest of the core disagree -------------------------
 //
 // Drawing reads the file with PDFium; counting pages, merging and splitting
@@ -457,9 +520,17 @@ fn a_file_cut_short_can_be_counted_and_cannot_be_drawn() {
 
     let counted = crate::page_count(&input);
     let drawn = renderer().render_page(&input, page(1), 100);
+    let counted_by_pdfium = renderer().page_count(&input);
 
     assert_eq!(counted.unwrap(), 2);
     match drawn {
+        Err(RenderError::NotPdf { path }) => assert_eq!(path, input),
+        other => panic!("expected not a PDF, got {other:?}"),
+    }
+    // The two ways of counting disagree as well: PDFium's count fails as
+    // its drawing does, so a window that counts with PDFium never shows
+    // pages it cannot draw.
+    match counted_by_pdfium {
         Err(RenderError::NotPdf { path }) => assert_eq!(path, input),
         other => panic!("expected not a PDF, got {other:?}"),
     }
@@ -481,6 +552,7 @@ fn a_catalog_without_a_page_tree_is_damage_to_count_and_no_pages_to_draw() {
 
     let counted = crate::page_count(&input);
     let drawn = renderer().render_page(&input, page(1), 100);
+    let counted_by_pdfium = renderer().page_count(&input);
 
     assert!(
         matches!(counted, Err(crate::PdfError::Broken { .. })),
@@ -490,6 +562,7 @@ fn a_catalog_without_a_page_tree_is_damage_to_count_and_no_pages_to_draw() {
         Err(RenderError::PageOutOfRange { page, pages }) => assert_eq!((page, pages), (1, 0)),
         other => panic!("expected a page out of range, got {other:?}"),
     }
+    assert_eq!(counted_by_pdfium.unwrap(), 0);
 }
 
 // --- Finding the library ----------------------------------------------------
@@ -713,4 +786,68 @@ fn printing_an_image_for_debugging_does_not_print_its_pixels() {
         format!("{image:?}"),
         "PageImage { width: 1, height: 1, rgba: 4 bytes }"
     );
+}
+
+// --- How long it takes -------------------------------------------------------
+
+/// Measures what a window pays to show thumbnails with the calls above,
+/// which open the file, do one thing and close it again.
+///
+/// The question it answers: is opening the file once per page affordable,
+/// or does the core need a call that draws several pages in one open? The
+/// first loop opens and closes the file 300 times and draws nothing (a
+/// count is all an open has to do), so its time is the price of the
+/// reopening alone. The other loops draw every page once, at two thumbnail
+/// widths: 160 pixels, and 320 for a screen with twice the pixels.
+///
+/// Two files, because opening is not the same work in both. A file made of
+/// 300 small pages has about 600 objects. The second one has 30,000 more
+/// objects that no page uses: what PDFium reads to open a file is the
+/// table that says where each object is, so this is the file where
+/// reopening costs the most.
+///
+/// Run it with the output shown, in release mode:
+/// `cargo test --release -p danonpdf-core -- --ignored --nocapture thumbnails`
+#[test]
+#[ignore = "a timing, not a check: run it by name, in release mode"]
+fn drawing_300_thumbnails_is_timed() {
+    let scratch = ScratchDir::new("render-timing");
+    let small = scratch.save("small.pdf", with_pages("P", 300));
+    let mut padded = with_pages("P", 300);
+    for number in 0..30_000_i64 {
+        padded.add_object(dictionary! { "Padding" => number });
+    }
+    let big = scratch.save("big.pdf", padded);
+    let renderer = renderer();
+
+    for (name, input) in [
+        ("300 pages", &small),
+        ("300 pages, 30,000 more objects", &big),
+    ] {
+        let bytes = fs::metadata(input).unwrap().len();
+
+        let start = Instant::now();
+        for _ in 0..300 {
+            assert_eq!(renderer.page_count(input).unwrap(), 300);
+        }
+        let opened = start.elapsed();
+        println!(
+            "{name} ({bytes} bytes): opening and closing 300 times took {opened:.1?} \
+             ({:.2?} each)",
+            opened / 300
+        );
+
+        for width in [160, 320] {
+            let start = Instant::now();
+            for number in 1..=300 {
+                renderer.render_page(input, page(number), width).unwrap();
+            }
+            let drawn = start.elapsed();
+            println!(
+                "{name}: drawing 300 pages {width} pixels wide, one open per page, took \
+                 {drawn:.1?} ({:.2?} each)",
+                drawn / 300
+            );
+        }
+    }
 }

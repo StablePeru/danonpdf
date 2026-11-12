@@ -9,7 +9,8 @@
 //!
 //! Nothing outside this file names a type of that crate. To draw pages with
 //! another engine, this is the file to replace: what the rest of the core
-//! needs from it is [`library_path`], [`load`] and [`Engine::render_page`].
+//! needs from it is [`library_path`], [`load`], [`Engine::page_count`] and
+//! [`Engine::render_page`].
 
 use std::io;
 use std::num::NonZeroUsize;
@@ -177,6 +178,24 @@ impl Engine {
         // plain comparison cannot: a link to the folder, a `..` on the way,
         // another letter case on Windows.
         self.library == asked || same_file(&self.library, asked)
+    }
+
+    /// How many pages the PDF at `path` has.
+    pub(super) fn page_count(&self, path: &Path) -> Result<usize, RenderError> {
+        // The same lock, and the same way of opening, as `render_page`
+        // below: its comments explain both. The two do not share a helper
+        // that returns the open document, because the document borrows the
+        // guard of the lock, and a function cannot return a value together
+        // with what it borrows from (E0515).
+        let pdfium = self.pdfium.lock().unwrap_or_else(PoisonError::into_inner);
+        let document = pdfium
+            .load_pdf_from_file(path, None)
+            .map_err(|error| open_failure(error, path))?;
+
+        // PDFium answers in a C `int`. A negative count would be a bug in
+        // PDFium; it is shown as a document without pages, as in the error
+        // of a page past the end.
+        Ok(usize::try_from(document.pages().len()).unwrap_or(0))
     }
 
     /// Draws page `number` (counted from 1) of the PDF at `path`, `width`

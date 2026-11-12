@@ -12,6 +12,8 @@
 //! - [`Renderer`]: the engine, loaded. [`Renderer::open`] loads it from a
 //!   folder, and [`default_library_folder`] says which folder that is
 //!   unless told otherwise.
+//! - [`Renderer::page_count`]: how many pages a file has, for the engine
+//!   that will draw them.
 //! - [`Renderer::render_page`]: one page of a file, as a [`PageImage`].
 //! - [`write_png`]: a [`PageImage`], as a PNG file.
 //!
@@ -151,6 +153,26 @@ impl Renderer {
     /// The library file that was loaded, as an absolute path.
     pub fn library(&self) -> &Path {
         self.engine.library()
+    }
+
+    /// How many pages the PDF file at `path` has, as PDFium counts them.
+    ///
+    /// It is the count to use before [`Self::render_page`]: both read the
+    /// file with PDFium, so every page from 1 to this number is one that
+    /// drawing will accept, and no other. The core's `page_count` reads
+    /// the file with lopdf, and the two can disagree about a damaged file
+    /// (see "What PDFium accepts" on [`Self::render_page`]). A front end
+    /// that draws the pages of a file should ask one engine both
+    /// questions.
+    ///
+    /// A file is refused for the reasons [`Self::render_page`] refuses it,
+    /// with the same errors. A document without pages is not an error
+    /// here: its count is 0.
+    ///
+    /// The file is opened, read and closed again in this one call, and is
+    /// never changed.
+    pub fn page_count(&self, path: &Path) -> Result<usize, RenderError> {
+        self.engine.page_count(path)
     }
 
     /// Draws one page of the PDF file at `path`.
