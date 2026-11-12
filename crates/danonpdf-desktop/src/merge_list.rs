@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use danonpdf_core::{MergeError, error_chain, is_pdf_path, merge_files, name_is_taken, same_file};
+use danonpdf_core::{PdfError, error_chain, is_pdf_path, merge_files, name_is_taken, same_file};
 
 use crate::texts;
 
@@ -53,7 +53,7 @@ pub enum Status {
     /// "report.pdf"; writing there would destroy an unrelated file silently.
     ExistsAfterAddingExtension { output: PathBuf },
     /// The last merge failed. The message already holds the whole chain of
-    /// causes, because `MergeError` cannot be cloned or kept around cheaply.
+    /// causes, because `PdfError` cannot be cloned or kept around cheaply.
     Failed { message: String },
 }
 
@@ -254,7 +254,7 @@ impl MergeList {
     /// outcome, including errors that are hard to cause with real files.
     /// Private: the tests are a child module (`mod tests` below), and a
     /// child module can see its parent's private items.
-    fn record_merge(&mut self, output: PathBuf, result: Result<usize, MergeError>) {
+    fn record_merge(&mut self, output: PathBuf, result: Result<usize, PdfError>) {
         self.status = match result {
             Ok(pages) => Status::Merged { pages, output },
             Err(error) => Status::Failed {

@@ -169,14 +169,14 @@ fn two_inputs() -> [PathBuf; 2] {
 
 #[test]
 fn every_merge_error_has_a_code_and_names_its_file() {
-    // One case per variant of `MergeError`. If the core grows a variant,
+    // One case per variant of `PdfError`. If the core grows a variant,
     // the `match` in `failure_from` (which has no `_` arm) stops compiling,
     // so this test cannot pass until the new variant has a code. Add its
     // case here at the same time.
-    let cases: [(MergeError, ErrorCode, Option<&str>); 5] = [
-        (MergeError::NoInputs, ErrorCode::NoInputs, None),
+    let cases: [(PdfError, ErrorCode, Option<&str>); 5] = [
+        (PdfError::NoInputs, ErrorCode::NoInputs, None),
         (
-            MergeError::Read {
+            PdfError::Read {
                 path: PathBuf::from("second.pdf"),
                 source: lopdf::Error::InvalidPassword,
             },
@@ -184,12 +184,12 @@ fn every_merge_error_has_a_code_and_names_its_file() {
             Some("second.pdf"),
         ),
         (
-            MergeError::Encrypted { input: 2 },
+            PdfError::Encrypted { input: 2 },
             ErrorCode::Encrypted,
             Some("second.pdf"),
         ),
         (
-            MergeError::Broken {
+            PdfError::Broken {
                 input: 1,
                 reason: "it has no catalog",
             },
@@ -197,7 +197,7 @@ fn every_merge_error_has_a_code_and_names_its_file() {
             Some("first.pdf"),
         ),
         (
-            MergeError::Save {
+            PdfError::Save {
                 path: PathBuf::from("out.pdf"),
                 source: io::Error::new(io::ErrorKind::PermissionDenied, "access denied"),
             },
@@ -220,7 +220,7 @@ fn an_input_number_outside_the_list_names_no_file() {
     // The core counts inputs from 1, so 0 is never a real input, and 3 is
     // past the end of a list of two. Neither may panic or name a wrong file.
     for input in [0, 3] {
-        let failure = failure_from(&MergeError::Encrypted { input }, &two_inputs());
+        let failure = failure_from(&PdfError::Encrypted { input }, &two_inputs());
 
         assert_eq!(failure.code, ErrorCode::Encrypted);
         assert_eq!(failure.path, None, "input {input}");

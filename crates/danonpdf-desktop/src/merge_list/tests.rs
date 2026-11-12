@@ -311,7 +311,7 @@ fn successful_merge_is_recorded_with_pages_and_output() {
 #[test]
 fn failed_merge_is_recorded_with_its_whole_chain_of_causes() {
     let mut list = list_of(&["a.pdf", "b.pdf"]);
-    let error = MergeError::Save {
+    let error = PdfError::Save {
         path: PathBuf::from("out.pdf"),
         source: io::Error::new(io::ErrorKind::PermissionDenied, "access denied"),
     };

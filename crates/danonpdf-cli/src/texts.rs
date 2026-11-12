@@ -9,7 +9,7 @@
 //! - The help (`--help`) lives in `cli.rs`, next to the arguments it
 //!   describes, because clap builds it from them.
 //! - The reason a merge failed inside the core comes from the core
-//!   (`MergeError` and the errors behind it).
+//!   (`PdfError` and the errors behind it).
 //!
 //! Sentences that follow "error: " start in lower case, as the core's do, so
 //! the two read the same on the screen.

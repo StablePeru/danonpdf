@@ -5,7 +5,7 @@
 //! not a hunt through the drawing code.
 //!
 //! One exception for now: when a merge fails, the reason comes from the core
-//! (`MergeError` and the errors behind it) in English. Translating those
+//! (`PdfError` and the errors behind it) in English. Translating those
 //! means matching on each kind of error here, which can wait until there is
 //! a second language.
 

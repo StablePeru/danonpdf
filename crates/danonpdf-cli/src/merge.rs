@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use danonpdf_core::{MergeError, error_chain, merge_files, name_is_taken, same_file};
+use danonpdf_core::{PdfError, error_chain, merge_files, name_is_taken, same_file};
 
 use crate::texts;
 
@@ -148,17 +148,17 @@ pub fn run(inputs: &[PathBuf], output: &Path, force: bool) -> Result<MergeReport
 /// `inputs` is the list the merge was called with. Two kinds of error only
 /// carry the place of the input in that list, counted from 1; with the list
 /// at hand, the path can be looked up for the caller.
-fn failure_from(error: &MergeError, inputs: &[PathBuf]) -> Failure {
-    // No `_ =>` arm, on purpose. With one, a variant added to `MergeError`
+fn failure_from(error: &PdfError, inputs: &[PathBuf]) -> Failure {
+    // No `_ =>` arm, on purpose. With one, a variant added to `PdfError`
     // later would fall into it silently and reach callers under a wrong
     // code. Without one, the compiler refuses to build this crate until the
     // new variant is given a code here.
     let (code, path) = match error {
-        MergeError::NoInputs => (ErrorCode::NoInputs, None),
-        MergeError::Read { path, .. } => (ErrorCode::ReadFailed, Some(path.clone())),
-        MergeError::Encrypted { input } => (ErrorCode::Encrypted, nth_input(inputs, *input)),
-        MergeError::Broken { input, .. } => (ErrorCode::BrokenPdf, nth_input(inputs, *input)),
-        MergeError::Save { path, .. } => (ErrorCode::SaveFailed, Some(path.clone())),
+        PdfError::NoInputs => (ErrorCode::NoInputs, None),
+        PdfError::Read { path, .. } => (ErrorCode::ReadFailed, Some(path.clone())),
+        PdfError::Encrypted { input } => (ErrorCode::Encrypted, nth_input(inputs, *input)),
+        PdfError::Broken { input, .. } => (ErrorCode::BrokenPdf, nth_input(inputs, *input)),
+        PdfError::Save { path, .. } => (ErrorCode::SaveFailed, Some(path.clone())),
     };
     Failure {
         code,
