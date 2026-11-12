@@ -38,6 +38,10 @@ pub(super) struct Engine {
     /// what it protects: the only way to reach the `Pdfium` inside is to
     /// lock it, so no code path can forget to.
     pdfium: Mutex<Pdfium>,
+    /// The library file, as an absolute path: the one the system was given
+    /// to load. A relative path would mean another file as soon as the
+    /// process changed its current folder, and this one has to name the
+    /// same file for as long as the program runs.
     library: PathBuf,
 }
 
@@ -60,23 +64,47 @@ static ENGINE: OnceLock<Engine> = OnceLock::new();
 /// loading a library can.
 static LOADING: Mutex<()> = Mutex::new(());
 
-/// The full path of the PDFium library inside `folder`. The file name
-/// depends on the system: `pdfium.dll` on Windows, `libpdfium.so` on Linux
-/// and `libpdfium.dylib` on macOS.
+/// The path of the PDFium library inside `folder`, as relative or as
+/// absolute as `folder` is. The file name depends on the system:
+/// `pdfium.dll` on Windows, `libpdfium.so` on Linux and `libpdfium.dylib`
+/// on macOS.
 pub(super) fn library_path(folder: &Path) -> PathBuf {
     Pdfium::pdfium_platform_library_name_at_path(folder)
 }
 
 /// The engine, loading PDFium from `folder` if this process has not loaded
 /// it yet.
+///
+/// Three questions, in this order, and the order is the rule:
+///
+/// 1. Is the file asked for the one that is loaded? Then that engine is
+///    the answer, whether or not the file is still on the disk: PDFium is
+///    in memory, and the file is not read again.
+/// 2. Is there a library file in `folder` at all? If not, it is missing,
+///    whatever is loaded: the answer for a folder without the library does
+///    not depend on who called first.
+/// 3. Is another library loaded already? Then this one cannot be.
 pub(super) fn load(folder: &Path) -> Result<&'static Engine, RenderError> {
-    let asked = library_path(folder);
-    // Asked first, and before looking at what is loaded: a folder without
-    // the library is the caller's mistake whatever happened earlier, and
-    // the answer must not depend on who called first.
-    if !asked.is_file() {
-        return Err(RenderError::LibraryMissing { path: asked });
-    }
+    let as_given = library_path(folder);
+    // The absolute path, worked out once and used for everything below:
+    // the comparison with what is loaded, the errors and the load itself.
+    //
+    // The system must be given a full path. Given a bare file name, Windows
+    // would search for it: in the folders of the system, in the current
+    // folder and along PATH. The current folder may be a downloads folder,
+    // and whatever is called pdfium.dll there would be loaded and run.
+    //
+    // `path::absolute` and not `fs::canonicalize`. It only puts the current
+    // folder in front of a relative path and never touches the disk, so it
+    // also works for a file that is not there, which is how a missing
+    // library gets its full path into the error. And on Windows,
+    // `canonicalize` answers in the `\\?\C:\...` form, which reads badly in
+    // a message. It fails only when the system cannot say what the current
+    // folder is.
+    let asked = std::path::absolute(&as_given).map_err(|error| RenderError::LibraryFailed {
+        path: as_given,
+        source: error.into(),
+    })?;
 
     // A lock is "poisoned" when a thread panicked while holding it, and
     // `lock()` then returns an error with the guard inside. This lock
@@ -84,33 +112,45 @@ pub(super) fn load(folder: &Path) -> Result<&'static Engine, RenderError> {
     // could have left half done: `into_inner` takes the guard anyway.
     let _one_at_a_time = LOADING.lock().unwrap_or_else(PoisonError::into_inner);
 
-    if let Some(engine) = ENGINE.get() {
-        // `same_file`, not `==`: "lib" and "./lib" are the same folder.
-        return if same_file(&engine.library, &asked) {
-            Ok(engine)
-        } else {
-            Err(RenderError::LibraryAlreadyLoaded {
-                loaded: engine.library.clone(),
-                asked,
-            })
-        };
+    let loaded = ENGINE.get();
+    // `if let ... && ...`: the pattern has to match and the test has to
+    // hold, or the block is skipped.
+    if let Some(engine) = loaded
+        && engine.was_loaded_from(&asked)
+    {
+        return Ok(engine);
+    }
+    if !asked.is_file() {
+        return Err(RenderError::LibraryMissing { path: asked });
+    }
+    if let Some(engine) = loaded {
+        return Err(RenderError::LibraryAlreadyLoaded {
+            loaded: engine.library.clone(),
+            asked,
+        });
     }
 
-    let failed = |source: Cause| RenderError::LibraryFailed {
-        path: asked.clone(),
-        source,
-    };
-    // The system is given a full path. Given a bare file name, Windows
-    // would search for it: in the folders of the system, in the current
-    // folder and along PATH. The current folder may be a downloads folder,
-    // and whatever is called pdfium.dll there would be loaded and run.
-    let full_path = std::path::absolute(&asked).map_err(|error| failed(error.into()))?;
     // This is where the foreign code comes in: the system maps the file
     // into the process, and `pdfium-render` looks up every function it
     // needs by name. A file that is not a library, or a PDFium of another
-    // build that lacks one of the functions, fails here.
-    let bindings =
-        Pdfium::bind_to_library(&full_path).map_err(|error| failed(load_failure(error)))?;
+    // build that lacks one of the functions, fails here. A failure leaves
+    // the process as it was: a later call can still load a good library.
+    //
+    // A `match` and not `map_err` with a closure: the error takes `asked`
+    // for itself, and so does the engine below. A closure that moves
+    // `asked` into the error owns it from the moment it is written, even
+    // if it never runs, and the compiler then refuses the second use
+    // (E0382). The arms of a `match` are plain code paths: the compiler
+    // sees that only one of them gives `asked` away, and that it returns.
+    let bindings = match Pdfium::bind_to_library(&asked) {
+        Ok(bindings) => bindings,
+        Err(error) => {
+            return Err(RenderError::LibraryFailed {
+                path: asked,
+                source: load_failure(error),
+            });
+        }
+    };
     let engine = Engine {
         // `Pdfium::new` starts the library (`FPDF_InitLibrary`).
         pdfium: Mutex::new(Pdfium::new(bindings)),
@@ -123,9 +163,20 @@ pub(super) fn load(folder: &Path) -> Result<&'static Engine, RenderError> {
 }
 
 impl Engine {
-    /// The library file this engine was loaded from, as it was asked for.
+    /// The library file this engine was loaded from, as an absolute path.
     pub(super) fn library(&self) -> &Path {
         &self.library
+    }
+
+    /// Whether `asked`, an absolute path, is the file this engine was
+    /// loaded from.
+    fn was_loaded_from(&self, asked: &Path) -> bool {
+        // Compared as paths first. That needs no file, so it still holds
+        // when the library was deleted or moved away after it was loaded.
+        // `same_file` then asks the disk, and catches the spellings that a
+        // plain comparison cannot: a link to the folder, a `..` on the way,
+        // another letter case on Windows.
+        self.library == asked || same_file(&self.library, asked)
     }
 
     /// Draws page `number` (counted from 1) of the PDF at `path`, `width`

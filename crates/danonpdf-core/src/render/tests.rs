@@ -546,35 +546,44 @@ fn the_same_folder_spelled_differently_is_the_same_library() {
     );
 }
 
-/// Loading a file that is not a library must fail cleanly. It can only be
-/// seen in a process that has not loaded PDFium yet: once it is loaded,
-/// asking for another file is refused before the system is asked to load
-/// anything (see the test above). So this test runs alone, by name:
-///
-/// ```text
-/// cargo test -p danonpdf-core -- --ignored a_file_that_is_not_a_library
-/// ```
 #[test]
-#[ignore = "needs a process that has not loaded PDFium: run it alone, by name"]
-fn a_file_that_is_not_a_library_fails_to_load() {
-    let scratch = ScratchDir::new("render-bad-library");
-    let fake = pdfium::library_path(scratch.path());
-    fs::write(&fake, "this is not a library").unwrap();
+fn the_same_folder_asked_twice_gives_the_same_library() {
+    let folder = default_library_folder().unwrap();
 
-    let result = Renderer::open(scratch.path());
+    let first = Renderer::open(&folder).unwrap();
+    let second = Renderer::open(&folder).unwrap();
 
-    match result {
-        Err(error @ RenderError::LibraryFailed { .. }) => {
-            // Printed with --nocapture, to see what the system says.
-            println!("{}", crate::error_chain(&error));
-            let RenderError::LibraryFailed { path, .. } = error else {
-                unreachable!()
-            };
-            assert_eq!(path, fake);
-        }
-        other => panic!("expected a library that fails to load, got {other:?}"),
-    }
+    assert_eq!(first.library(), second.library());
+    // Both are handles to the one engine of the process, not two engines
+    // that happen to come from one file. `ptr::eq` compares the two
+    // addresses, not what is stored there.
+    assert!(std::ptr::eq(first.engine, second.engine));
 }
+
+#[test]
+fn the_loaded_library_is_known_by_its_absolute_path() {
+    // Two lines and not `renderer().library()`: the path is borrowed from
+    // the renderer, which therefore needs a name to live under until the
+    // last use of the path. Without one it is a temporary, dropped at the
+    // end of its own statement (E0716).
+    let renderer = renderer();
+    let library = renderer.library();
+
+    assert!(library.is_absolute(), "{}", library.display());
+    assert!(library.is_file(), "{}", library.display());
+}
+
+// Three cases are not here, because each needs a process of its own, and
+// every test in this file shares one process and one engine. They are the
+// programs in `tests/` of this crate:
+//
+// - `render_fake_library.rs`: a file that is not a library fails to load.
+//   It can only be seen before PDFium is loaded: afterwards, another file
+//   is refused before the system is asked to load anything (see
+//   `a_second_library_cannot_replace_the_one_that_is_loaded` above).
+// - `render_relative_folder.rs`: the folder given as a relative path, and
+//   the process moving to another folder afterwards.
+// - `render_removed_library.rs`: the library file deleted after loading.
 
 // --- Writing a PNG -----------------------------------------------------------
 

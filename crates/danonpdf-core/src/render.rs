@@ -117,15 +117,29 @@ impl Renderer {
     /// such files: `pdfium.dll` on Windows, `libpdfium.so` on Linux. See
     /// [`default_library_folder`] for the folder a program should use.
     ///
+    /// A relative folder is taken from the current folder of the process at
+    /// the moment of the call, and turned into an absolute path at once.
+    /// That absolute path is what the engine remembers and what every
+    /// error names, so neither changes meaning if the process moves to
+    /// another folder later.
+    ///
     /// A process can load PDFium once. The first call that succeeds decides
     /// which file it is, for good:
     ///
     /// - A later call that names the same file gets the same engine. It
     ///   costs almost nothing, so callers need not keep the first one
-    ///   around.
-    /// - A later call that names another file fails with
+    ///   around. This holds even if the file has been deleted or replaced
+    ///   since: the library is in memory and is not read again. It is the
+    ///   path that is compared, not what the file holds.
+    /// - A later call that names a folder without the library fails with
+    ///   [`RenderError::LibraryMissing`], as it would in a process that
+    ///   has loaded nothing.
+    /// - A later call that names another library file fails with
     ///   [`RenderError::LibraryAlreadyLoaded`], instead of handing over, in
     ///   silence, an engine that is not the one asked for.
+    ///
+    /// A call that fails loads nothing and uses nothing up: a later call
+    /// can still load a good library.
     ///
     /// Loading a library runs code from that file inside this program, with
     /// everything the program may do. Only load it from a folder that is
@@ -134,7 +148,7 @@ impl Renderer {
         pdfium::load(library_folder).map(|engine| Self { engine })
     }
 
-    /// The library file that was loaded.
+    /// The library file that was loaded, as an absolute path.
     pub fn library(&self) -> &Path {
         self.engine.library()
     }

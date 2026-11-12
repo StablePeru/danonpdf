@@ -40,15 +40,21 @@ pub enum RenderError {
     /// The program could not tell which folder it runs from, so there is no
     /// default place to look for the PDFium library.
     LibraryFolderUnknown { source: io::Error },
-    /// There is no PDFium library at `path` (the full path, file name
-    /// included).
+    /// There is no PDFium library at `path`: an absolute path, file name
+    /// included, also when the folder was given as a relative one.
     LibraryMissing { path: PathBuf },
-    /// There is a file at `path`, and the system could not load it as the
-    /// PDFium library: it is not a library, it is one for another kind of
-    /// computer, or it lacks functions that this program needs.
+    /// There is a file at `path` (absolute, like the one above), and the
+    /// system could not load it as the PDFium library: it is not a
+    /// library, it is one for another kind of computer, or it lacks
+    /// functions that this program needs.
+    ///
+    /// One rare case keeps `path` as it was given: the system could not
+    /// say what the current folder is, so a relative path could not be
+    /// made absolute, and nothing was loaded for that reason.
     LibraryFailed { path: PathBuf, source: Cause },
-    /// PDFium is already loaded from `loaded`, and `asked` is another file.
-    /// A program can load PDFium once: it cannot be swapped while running.
+    /// PDFium is already loaded from `loaded`, and `asked` is another file
+    /// (both absolute). A program can load PDFium once: it cannot be
+    /// swapped while running.
     LibraryAlreadyLoaded { loaded: PathBuf, asked: PathBuf },
     /// The file could not be opened or read at all.
     Read { path: PathBuf, source: io::Error },
