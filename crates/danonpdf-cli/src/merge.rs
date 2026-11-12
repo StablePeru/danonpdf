@@ -64,7 +64,9 @@ pub enum ErrorCode {
     Encrypted,
     /// An input opened, but its structure is damaged.
     BrokenPdf,
-    /// The merged file could not be written.
+    /// A page was asked for that the document does not have.
+    PageOutOfRange,
+    /// An output file, or the folder for it, could not be written.
     SaveFailed,
 }
 
@@ -83,6 +85,7 @@ impl ErrorCode {
             Self::ReadFailed => "read_failed",
             Self::Encrypted => "encrypted",
             Self::BrokenPdf => "broken_pdf",
+            Self::PageOutOfRange => "page_out_of_range",
             Self::SaveFailed => "save_failed",
         }
     }
@@ -158,7 +161,15 @@ fn failure_from(error: &PdfError, inputs: &[PathBuf]) -> Failure {
         PdfError::Read { path, .. } => (ErrorCode::ReadFailed, Some(path.clone())),
         PdfError::Encrypted { input } => (ErrorCode::Encrypted, nth_input(inputs, *input)),
         PdfError::Broken { input, .. } => (ErrorCode::BrokenPdf, nth_input(inputs, *input)),
-        PdfError::Save { path, .. } => (ErrorCode::SaveFailed, Some(path.clone())),
+        // About the pages that were asked for, not about a file: no path.
+        PdfError::PageOutOfRange { .. } => (ErrorCode::PageOutOfRange, None),
+        // Two ways for the output not to reach the disk, one code: a caller
+        // does the same about both (check `path` and what is around it).
+        // `|` joins two patterns into one arm; both bind `path` to the same
+        // type, which is what makes that allowed.
+        PdfError::CreateFolder { path, .. } | PdfError::Save { path, .. } => {
+            (ErrorCode::SaveFailed, Some(path.clone()))
+        }
     };
     Failure {
         code,

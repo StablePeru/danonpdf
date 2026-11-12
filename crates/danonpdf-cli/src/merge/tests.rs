@@ -173,7 +173,7 @@ fn every_merge_error_has_a_code_and_names_its_file() {
     // the `match` in `failure_from` (which has no `_` arm) stops compiling,
     // so this test cannot pass until the new variant has a code. Add its
     // case here at the same time.
-    let cases: [(PdfError, ErrorCode, Option<&str>); 5] = [
+    let cases: [(PdfError, ErrorCode, Option<&str>); 7] = [
         (PdfError::NoInputs, ErrorCode::NoInputs, None),
         (
             PdfError::Read {
@@ -195,6 +195,19 @@ fn every_merge_error_has_a_code_and_names_its_file() {
             },
             ErrorCode::BrokenPdf,
             Some("first.pdf"),
+        ),
+        (
+            PdfError::PageOutOfRange { page: 9, pages: 5 },
+            ErrorCode::PageOutOfRange,
+            None,
+        ),
+        (
+            PdfError::CreateFolder {
+                path: PathBuf::from("parts"),
+                source: io::Error::new(io::ErrorKind::PermissionDenied, "access denied"),
+            },
+            ErrorCode::SaveFailed,
+            Some("parts"),
         ),
         (
             PdfError::Save {
@@ -239,6 +252,7 @@ fn error_codes_are_spelled_as_documented() {
         (ErrorCode::ReadFailed, "read_failed"),
         (ErrorCode::Encrypted, "encrypted"),
         (ErrorCode::BrokenPdf, "broken_pdf"),
+        (ErrorCode::PageOutOfRange, "page_out_of_range"),
         (ErrorCode::SaveFailed, "save_failed"),
     ];
     for (code, text) in codes {

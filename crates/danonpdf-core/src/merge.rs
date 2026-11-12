@@ -24,7 +24,7 @@ use lopdf::{Document, ObjectId};
 
 use crate::PdfError;
 use crate::document::{InputProblem, detach_pages, install_page_tree, is_locked, load, set_parent};
-use crate::save::save_atomically;
+use crate::save::save;
 
 /// Merges `documents` into a new document: all the pages of the first one,
 /// then all the pages of the second one, and so on.
@@ -144,10 +144,7 @@ pub fn merge_files<P: AsRef<Path>>(inputs: &[P], output: &Path) -> Result<usize,
     merged.prune_objects();
     let page_count = merged.page_iter().count();
 
-    save_atomically(&mut merged, output).map_err(|source| PdfError::Save {
-        path: output.to_path_buf(),
-        source,
-    })?;
+    save(&mut merged, output)?;
     Ok(page_count)
 }
 

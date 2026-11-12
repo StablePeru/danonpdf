@@ -8,6 +8,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lopdf::Document;
 
+use crate::PdfError;
+
+/// Saves `document` at `path` in one step (see [`save_atomically`]), and
+/// names `path` in the error if it cannot.
+///
+/// `pub(crate)`: every module of this crate may call it, and no other crate
+/// can. Callers outside reach it through the operations that save.
+pub(crate) fn save(document: &mut Document, path: &Path) -> Result<(), PdfError> {
+    save_atomically(document, path).map_err(|source| PdfError::Save {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
 /// Saves `document` at `path` without ever leaving a half-written file there.
 ///
 /// Writing straight into `path` would first empty the file and then fill it
@@ -21,10 +35,7 @@ use lopdf::Document;
 /// the name at the other file, in one step. Anyone opening `path` gets either
 /// the old file or the new one, never a mix. `std::fs::rename` replaces an
 /// existing file on Linux, macOS and Windows alike.
-///
-/// `pub(crate)`: every module of this crate may call it, and no other crate
-/// can. Callers outside get it through the operations that save.
-pub(crate) fn save_atomically(document: &mut Document, path: &Path) -> io::Result<()> {
+fn save_atomically(document: &mut Document, path: &Path) -> io::Result<()> {
     let temporary = temporary_path_for(path)?;
     // `create_new` refuses to open a file that already exists, so we never
     // write over a file that happens to have the same name.

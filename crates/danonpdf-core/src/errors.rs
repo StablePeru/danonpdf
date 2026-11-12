@@ -1,11 +1,16 @@
 //! What can go wrong in the core, and how an error is turned into one line
 //! of text for every front end.
 //!
-//! Every operation (merge today, others later) returns the same
+//! Every operation (merge, extract, split, counting pages) returns the same
 //! [`PdfError`]. They fail in the same ways: an input that cannot be read,
 //! that needs a password or that is damaged, and an output that cannot be
 //! written. One enum for all of them means one place where a front end
 //! decides what each failure means to its user.
+//!
+//! The price is that the type says a little less than it could: nothing in
+//! it tells that a merge never returns `PageOutOfRange`, or that a split
+//! never returns `NoInputs`. An enum per operation would say so, and would
+//! repeat the four shared failures in each.
 //!
 //! [`PdfError`] keeps its own message short and hands the lower-level error
 //! over through `source()`. Whoever shows the error (the window's status
@@ -30,7 +35,16 @@ pub enum PdfError {
     Encrypted { input: usize },
     /// An input opened, but its structure is broken.
     Broken { input: usize, reason: &'static str },
-    /// The new document could not be written. Writing reports a plain
+    /// A page selection names a page that the document does not have:
+    /// `page`, in a document of `pages` pages.
+    PageOutOfRange { page: usize, pages: usize },
+    /// The folder that the new files go into does not exist and could not
+    /// be created.
+    CreateFolder {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    /// A new document could not be written. Writing reports a plain
     /// input/output error, not a `lopdf::Error`.
     Save {
         path: PathBuf,
@@ -49,6 +63,21 @@ impl fmt::Display for PdfError {
                 write!(f, "input {input} is encrypted and needs a password")
             }
             Self::Broken { input, reason } => write!(f, "input {input} is damaged: {reason}"),
+            Self::PageOutOfRange { page, pages } => {
+                // A `match` is an expression: each arm gives the text for
+                // one case, and `_` takes every number that is not 1.
+                let length = match pages {
+                    1 => "1 page".to_owned(),
+                    _ => format!("{pages} pages"),
+                };
+                write!(
+                    f,
+                    "page {page} is past the end of the document, which has {length}"
+                )
+            }
+            Self::CreateFolder { path, .. } => {
+                write!(f, "cannot create the folder {}", path.display())
+            }
             Self::Save { path, .. } => write!(f, "cannot save {}", path.display()),
         }
     }
@@ -59,12 +88,16 @@ impl Error for PdfError {
     /// leaves it out on purpose, so a caller can print the whole chain
     /// without saying the same thing twice.
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        // Two arms, not `Read { source, .. } | Save { source, .. }`: in an
-        // or-pattern a name must have one type, and these two differ.
+        // `Read` cannot join the or-pattern of the other two: in an
+        // or-pattern a name must have one type, and its `source` is a
+        // `lopdf::Error` while theirs is a `std::io::Error`.
         match self {
             Self::Read { source, .. } => Some(source),
-            Self::Save { source, .. } => Some(source),
-            Self::NoInputs | Self::Encrypted { .. } | Self::Broken { .. } => None,
+            Self::CreateFolder { source, .. } | Self::Save { source, .. } => Some(source),
+            Self::NoInputs
+            | Self::Encrypted { .. }
+            | Self::Broken { .. }
+            | Self::PageOutOfRange { .. } => None,
         }
     }
 }
@@ -105,6 +138,30 @@ mod tests {
         assert_eq!(
             PdfError::Encrypted { input: 2 }.to_string(),
             "input 2 is encrypted and needs a password"
+        );
+    }
+
+    #[test]
+    fn a_page_past_the_end_says_how_long_the_document_is() {
+        assert_eq!(
+            PdfError::PageOutOfRange { page: 9, pages: 5 }.to_string(),
+            "page 9 is past the end of the document, which has 5 pages"
+        );
+        assert_eq!(
+            PdfError::PageOutOfRange { page: 2, pages: 1 }.to_string(),
+            "page 2 is past the end of the document, which has 1 page"
+        );
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_created_is_named_with_the_reason() {
+        let error = PdfError::CreateFolder {
+            path: PathBuf::from("parts"),
+            source: io::Error::new(io::ErrorKind::PermissionDenied, "access denied"),
+        };
+        assert_eq!(
+            error_chain(&error),
+            "cannot create the folder parts: access denied"
         );
     }
 

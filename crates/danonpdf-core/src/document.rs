@@ -20,6 +20,10 @@ use crate::PdfError;
 /// instead of storing them itself (PDF 1.7, section 7.7.3.4).
 const INHERITABLE_KEYS: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"Rotate"];
 
+/// Why a document is refused when its page tree lists a page whose object
+/// is not in the file.
+const MISSING_PAGE: &str = "a page in its page tree is missing";
+
 /// What is wrong with one input, before we know its place in the list.
 pub(crate) enum InputProblem {
     Encrypted,
@@ -82,6 +86,16 @@ pub(crate) fn detach_pages(document: &mut Document) -> Result<DetachedPages, Inp
     if pages.is_empty() {
         return Err(InputProblem::Broken("its page tree has no pages"));
     }
+    // lopdf keeps the place of a page whose object is missing, so the ids
+    // can name objects that are not there. Found here, before any page is
+    // taken, the whole document is refused: a split never gets halfway
+    // through its files and then meets the bad page.
+    if pages
+        .iter()
+        .any(|&page_id| document.get_dictionary(page_id).is_err())
+    {
+        return Err(InputProblem::Broken(MISSING_PAGE));
+    }
 
     // Read the old tree before anyone takes it apart.
     for &page_id in &pages {
@@ -104,7 +118,7 @@ pub(crate) fn set_parent(
     for &page_id in pages {
         document
             .get_dictionary_mut(page_id)
-            .map_err(|_| InputProblem::Broken("a page in its page tree is missing"))?
+            .map_err(|_| InputProblem::Broken(MISSING_PAGE))?
             .set("Parent", parent);
     }
     Ok(())

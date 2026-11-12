@@ -6,7 +6,7 @@
 //! in `lib.rs`), so none of this reaches the library that ships.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use lopdf::content::{Content, Operation};
 use lopdf::{
@@ -164,6 +164,11 @@ impl ScratchDir {
         let path = std::env::temp_dir().join(name);
         fs::create_dir_all(&path).unwrap();
         Self(path)
+    }
+
+    /// The folder itself.
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
     }
 
     pub(crate) fn file(&self, name: &str) -> PathBuf {

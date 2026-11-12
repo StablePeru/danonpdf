@@ -4,8 +4,10 @@
 mod document;
 mod errors;
 mod merge;
+mod pages;
 mod paths;
 mod save;
+mod split;
 #[cfg(test)]
 mod test_support;
 
@@ -13,7 +15,9 @@ mod test_support;
 // write `danonpdf_core::merge_files` and not the longer path.
 pub use errors::{PdfError, error_chain};
 pub use merge::{merge_documents, merge_files};
+pub use pages::{PageSelection, PageSyntaxError};
 pub use paths::{name_is_taken, same_file};
+pub use split::{SplitError, SplitPlan, extract_file, page_count, plan_split, split_output_paths};
 
 use std::path::Path;
 
