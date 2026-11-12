@@ -1,8 +1,14 @@
 [workspace]
-# Two crates: a core that only knows about PDF (no GUI, all the tests) and a
-# desktop app that only draws and calls the core. Keeping them apart means a
-# command-line tool or a different GUI can reuse the core untouched.
-members = ["crates/danonpdf-core", "crates/danonpdf-desktop"]
+# Three crates: a core that only knows about PDF (no user interface, all the
+# PDF tests) and two front ends that only call it. The desktop app draws a
+# window; the command-line tool reads arguments and prints a report, so a
+# script or an AI agent can do the same work without a screen. Neither front
+# end holds PDF logic, so they cannot disagree about what a merge does.
+members = [
+    "crates/danonpdf-cli",
+    "crates/danonpdf-core",
+    "crates/danonpdf-desktop",
+]
 # Resolver "3" is the default for edition 2024; it is spelled out because a
 # virtual workspace (no [package] here) does not pick it up from an edition.
 resolver = "3"
@@ -18,9 +24,15 @@ rust-version = "1.99"
 license = "GPL-3.0-only"
 repository = "https://github.com/StablePeru/danonpdf"
 
-# Dependency versions live here once, so both crates always agree.
+# Dependency versions live here once, so every crate always agrees.
 [workspace.dependencies]
 danonpdf-core = { path = "crates/danonpdf-core" }
+# Parses the command line of danonpdf-cli (MIT OR Apache-2.0). `derive` turns
+# a plain struct into the parser, the `--help` text and the usage errors, so
+# the three cannot drift apart. Its default features stay on: they are that
+# help and usage text, colour when the output is a terminal, and "did you
+# mean" hints for a mistyped flag.
+clap = { version = "4.6", features = ["derive"] }
 # The defaults would pull in wgpu, which does not cross-compile to
 # x86_64-pc-windows-gnu (gfx-rs/wgpu#8303). Each crate picks its features.
 eframe = { version = "0.37", default-features = false }
@@ -33,6 +45,14 @@ lopdf = { version = "0.47", default-features = false, features = ["rayon"] }
 # xdg-desktop-portal backend and Wayland window parenting); the desktop crate
 # turns on what each platform needs.
 rfd = { version = "0.18", default-features = false }
+# Turns the report types of danonpdf-cli into data that an output format can
+# write (MIT OR Apache-2.0). `derive` writes that code for each struct. Only
+# the command-line tool uses it: the core stays free of output formats.
+serde = { version = "1.0", features = ["derive"] }
+# Writes that data as JSON, with every string escaped correctly (MIT OR
+# Apache-2.0). Building JSON by hand with `format!` breaks on the first path
+# that holds a quote or a backslash, and Windows paths are full of the latter.
+serde_json = "1.0"
 
 [profile.release]
 # Optimise across crate boundaries: slower to build, smaller and faster binary.

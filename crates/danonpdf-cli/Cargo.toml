@@ -1,0 +1,25 @@
+[package]
+name = "danonpdf-cli"
+description = "DanonPDF from the command line, for scripts and AI agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# No [[bin]] table: with a src/main.rs, Cargo names the program after the
+# package, so this builds danonpdf-cli (danonpdf-cli.exe on Windows). It is a
+# program of its own, not a mode of danonpdf.exe: a Windows program is either
+# a console program or a GUI one, and only a console program gives a script
+# its stdout, its stderr and an exit code to wait for.
+
+[dependencies]
+danonpdf-core.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# Only the tests use lopdf directly: they build small PDFs to merge and read
+# the merged file back to count its pages.
+lopdf.workspace = true

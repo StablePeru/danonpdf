@@ -2,7 +2,7 @@
 
 DanonPDF will be a free, fast desktop tool for everyday PDF work: merge, split, rotate, reorder and delete pages with thumbnails, compress, and turn images into PDF. Windows first, Linux later. It is part of DanonAA.
 
-> **Status:** early work. The app can merge PDF files. The other tools do not exist yet.
+> **Status:** early work. The app can merge PDF files, from the window or from the command line. The other tools do not exist yet.
 
 ## Merging PDFs
 
@@ -11,6 +11,43 @@ DanonPDF will be a free, fast desktop tool for everyday PDF work: merge, split, 
 3. Click **Merge…** and choose where to save. It proposes `merged.pdf` next to the first file, or `merged (2).pdf` and so on when that name is already in the list. It refuses to write over one of the files being merged (a hard link to one of them is not recognised). If you type a name without `.pdf`, it adds `.pdf`, and it does not merge when a file with that name already exists: choose that file in the dialog to replace it. The line at the bottom then says how many pages were written, or why the merge failed.
 
 The merge runs while the window waits, so with very big files the window may stop answering for a few seconds. Bookmarks, named destinations, form fields and the tagged structure of the inputs are not carried over yet.
+
+## Command line
+
+`danonpdf-cli` does the same merge without a window, so a script or an AI agent can use it. It never asks a question, never waits for input and never uses the network.
+
+```sh
+danonpdf-cli merge --output merged.pdf first.pdf second.pdf
+danonpdf-cli merge --json --output merged.pdf first.pdf second.pdf
+```
+
+The first form prints one line, such as `Merged 2 files (12 pages) into merged.pdf`, or `error: …` on stderr when it fails. With `--json` it prints exactly one JSON object on stdout, for a success and for a failure alike, and nothing on stderr:
+
+```text
+{"ok":true,"operation":"merge","output":"merged.pdf","inputs":2,"pages":12}
+{"ok":false,"operation":"merge","error":{"code":"output_exists","message":"…","path":"merged.pdf"}}
+```
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | The files were merged. |
+| `1` | The merge was refused or failed. |
+| `2` | The command line was wrong. The message is plain text on stderr, also with `--json`. |
+
+What it does and does not do:
+
+- It reads every input, in the order given. No file is skipped for its name, and the same file given twice is merged twice.
+- It uses the output path exactly as given: it does not add `.pdf`.
+- It never writes over one of the inputs, not even with `--force` (a hard link to one of them is not recognised).
+- It replaces an existing output only with `--force`.
+
+`danonpdf-cli --help` shows all of this with the list of error codes. [AGENTS.md](AGENTS.md) is the same contract written for an agent.
+
+To try it from the build container, put the PDFs somewhere inside the checkout (the container only sees the checkout, mounted at `/workspace`) and pass paths relative to the repository root:
+
+```sh
+docker compose run --rm build cargo run --release -p danonpdf-cli -- merge --output merged.pdf first.pdf second.pdf
+```
 
 ## Why local
 
@@ -32,7 +69,7 @@ docker compose run --rm build cargo test --workspace
 docker compose run --rm build bash scripts/build-windows.sh
 ```
 
-The last command cross-compiles the Windows app and leaves it at `dist/danonpdf.exe`. Run that file on Windows: a window does not open from inside a container.
+The last command cross-compiles both Windows programs and leaves them in `dist/`: `danonpdf.exe`, the desktop app, and `danonpdf-cli.exe`, the command-line tool. Run them on Windows: a window does not open from inside a container.
 
 Downloaded crates and build output are kept in Docker volumes, not in the checkout. On Linux, build the image with your own user so the files the container writes stay yours:
 
@@ -48,7 +85,7 @@ docker compose down --volumes
 
 ## Try merging from the command line
 
-The core comes with a small example program that merges PDF files. Put the PDFs somewhere inside the checkout (the container only sees the checkout, mounted at `/workspace`), then pass paths relative to the repository root, output first:
+The core also comes with a small example program that merges PDF files. It shows how to call the core from Rust; to merge files for real, use `danonpdf-cli` (see [Command line](#command-line)). Put the PDFs somewhere inside the checkout (the container only sees the checkout, mounted at `/workspace`), then pass paths relative to the repository root, output first:
 
 ```sh
 docker compose run --rm build cargo run --release --example merge -- merged.pdf first.pdf second.pdf
@@ -62,11 +99,14 @@ It prints how many pages it wrote, or why it could not merge.
 | --- | --- |
 | `crates/danonpdf-core` | The PDF logic, with no user interface. |
 | `crates/danonpdf-core/examples/merge.rs` | The command-line merge example above. |
+| `crates/danonpdf-cli` | The command-line tool (`danonpdf-cli`): arguments in, a line or a JSON object out. |
+| `crates/danonpdf-cli/tests/cli.rs` | Runs the real program and checks its output and exit codes. |
 | `crates/danonpdf-desktop` | The desktop app (`danonpdf`), built with [egui](https://github.com/emilk/egui). |
 | `crates/danonpdf-desktop/src/merge_list.rs` | The merge window's state and rules, tested without a window. |
 | `crates/danonpdf-desktop/src/app.rs` | Draws the window and turns clicks and dropped files into calls on that state. |
 | `crates/danonpdf-desktop/src/texts.rs` | Every text the user sees, ready for a translation. |
-| `scripts/build-windows.sh` | Builds `dist/danonpdf.exe`. |
+| `scripts/build-windows.sh` | Builds `dist/danonpdf.exe` and `dist/danonpdf-cli.exe`. |
+| `AGENTS.md` | How an AI agent uses `danonpdf-cli` and works on this repository. |
 
 ## License
 
