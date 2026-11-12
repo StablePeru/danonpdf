@@ -132,7 +132,8 @@ A path that is not valid Unicode is written with replacement characters.
 - It never writes over an input, with or without `--force`. Another spelling of the same file (`./a.pdf`, a symbolic link) still counts as that file; a hard link does not.
 - It never replaces an existing file unless `--force` is given.
 - It writes each output in one step: a failed operation leaves no half-written file and changes no input.
-- `merge` and `extract` wait until their output is on the disk before they report. `split` does not wait for each of its files, which would take most of its time: after a power cut during or just after a `split`, run it again with `--force`.
+- `merge` and `extract` wait until their output is on the disk before they report, and report a failure to get it there as `save_failed`.
+- `split` does not wait for the disk: `"ok":true` means every file was written and named, not that it is on the disk yet. A power cut during or just after a `split` can leave files empty or incomplete, and a write error the system only meets later (a network share that went away, a quota, a full disk) is never reported. **Do not delete the input because a `split` returned `ok`.** Read the new files back first: `info` on each one, and the page counts must add up to the input's. That proves what the system holds; only time or a restart proves what the disk holds. If files are wrong or missing, run the `split` again with `--force`.
 - `merge`, `info` and `extract` write everything or nothing. `split` writes its files one after another: if one cannot be saved, it stops, keeps the ones already written and lists them in `error.written`.
 - It uses paths exactly as given. It does not add `.pdf`, skip inputs by name or drop repeated inputs.
 - Only pages and what they use are carried over. Bookmarks, named destinations, form fields, the tagged structure and the document information of the inputs are not.

@@ -19,6 +19,12 @@ use crate::PdfError;
 /// leaves half a file under the final name. The choice is about one thing
 /// only: whether to wait for the disk before the rename.
 ///
+/// A program that writes a file only hands its bytes to the system, which
+/// keeps them in memory and writes them out a moment later. Waiting for
+/// the disk (`sync_all`) does two things at once: it returns only when the
+/// bytes are written, and it is the only way to be told that they could
+/// not be. A save that does not wait gives up both.
+///
 /// An enum and not a `bool`: `save(document, path, true)` says nothing to
 /// someone reading the call, and `save(document, path, Durability::Synced)`
 /// says what was chosen. Each caller picks one, and writes down why where
@@ -27,7 +33,13 @@ use crate::PdfError;
 pub(crate) enum Durability {
     /// Wait until the bytes are on the disk itself before the file gets
     /// its name (`sync_all`). Once the save returns, a power cut cannot
-    /// leave `path` naming an empty or incomplete file.
+    /// leave `path` naming an empty or incomplete file, and an error in
+    /// writing the bytes out has been reported as a failed save.
+    ///
+    /// What is not promised: only the file is synced, not the folder that
+    /// holds its name. After a power cut `path` may still name what it
+    /// named before the save (the old file, or nothing), never half of the
+    /// new one.
     ///
     /// For a save that may replace a file the user cannot get back, such
     /// as a merge or an extraction written over an existing file. The wait
@@ -37,9 +49,17 @@ pub(crate) enum Durability {
     /// Rename as soon as the system has taken the bytes, without waiting
     /// for the disk. The system writes them out by itself a moment later.
     ///
-    /// If the power goes in that moment, `path` may be left naming an empty
-    /// or incomplete file. Only for files that can simply be made again
-    /// from an input that is still there.
+    /// A save that returns without an error then means "handed over whole",
+    /// not "on the disk":
+    ///
+    /// - If the power goes in that moment, `path` may be left naming an
+    ///   empty or incomplete file.
+    /// - If the system cannot write the bytes out when it gets to them (a
+    ///   network share that went away, a quota, a disk that turns out to be
+    ///   full), nobody is told: the file is already closed.
+    ///
+    /// Only for files that can simply be made again from an input that is
+    /// still there, and whose caller says so to its own callers.
     Unsynced,
 }
 

@@ -747,9 +747,12 @@ fn a_folder_that_cannot_be_created_stops_the_split_before_any_file() {
 /// ```
 ///
 /// The pages are tiny, so this times the work per file (find what the page
-/// uses, copy it, write it, rename) and not the copying of big images. It
-/// is the measurement behind the choice not to wait for the disk after
-/// each part: see "Cost" on `SplitPlan::write`.
+/// uses, copy it, write it, rename) and not the copying of big images.
+///
+/// It prints two times: the split as `SplitPlan::write` does it, and what
+/// waiting for the disk once at the end, for every file, would add. Those
+/// are the numbers behind the choice not to wait at all: see "Not forced
+/// to the disk" on `SplitPlan::write`.
 #[test]
 #[ignore = "a timing, not a check: run it by name, in release mode"]
 fn splitting_300_pages_into_300_files_is_timed() {
@@ -762,8 +765,32 @@ fn splitting_300_pages_into_300_files_is_timed() {
     let planned = start.elapsed();
     let outputs = plan.write().unwrap();
     let total = start.elapsed();
+    // Not part of a split: the final pass that was tried and left out.
+    wait_for_the_disk(&outputs);
+    let with_wait = start.elapsed();
 
     assert_eq!(outputs.len(), 300);
     assert_eq!(markers_in(&outputs[299]), ["P300"]);
-    println!("split 300 pages into 300 files in {total:.1?} (reading and planning: {planned:.1?})");
+    // A `Duration` minus an earlier one is the time between the two.
+    println!(
+        "split 300 pages into 300 files in {total:.1?} (reading and planning: {planned:.1?}); \
+         waiting for the disk afterwards, which a split does not do, would add {:.1?}",
+        with_wait - total
+    );
+}
+
+/// Opens every file again and waits until the disk holds it: the one pass
+/// at the end that a split was measured with and does not make.
+///
+/// Each file is opened for writing although nothing is written to it:
+/// Windows refuses to flush a file through a handle that may only read.
+fn wait_for_the_disk(paths: &[PathBuf]) {
+    for path in paths {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .sync_all()
+            .unwrap();
+    }
 }

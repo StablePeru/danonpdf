@@ -378,18 +378,41 @@ impl SplitPlan {
     ///
     /// # Not forced to the disk
     ///
-    /// Unlike a merge or an extraction, a split does not wait for the disk
-    /// after each file ([`Durability::Unsynced`]). If the power goes while
-    /// it runs or in the moments after it, some of its files may be left
-    /// empty or incomplete. The input is never touched, so the way out is
-    /// to run the split again.
+    /// Unlike a merge or an extraction, a split never waits for the disk
+    /// ([`Durability::Unsynced`]): not after each file, and not once at the
+    /// end. `Ok` therefore means that every file was handed to the system
+    /// whole and has its name. It does not mean that any of them is on the
+    /// disk yet. Two things follow:
     ///
-    /// That wait was measured at over 99% of the time of a split into many
-    /// small files: with it, 300 one-page files took 2.9 s on Windows and
-    /// about 5 s in the build container; without it, about 20 ms in that
-    /// same container (the timing test at the end of `split/tests.rs`).
-    /// The price is a split to run again after a power cut, from an input
-    /// that is still whole.
+    /// - If the power goes while the split runs or in the moments after it,
+    ///   some of its files may be left empty or incomplete.
+    /// - An error that the system only meets when it writes the bytes out
+    ///   later (a network share that went away, a quota, a disk that turns
+    ///   out to be full) is never reported: the file was closed without
+    ///   asking, and by then the split has said `Ok`.
+    ///
+    /// The input is never written to, so the way out of both is to run the
+    /// split again. That only works while the input exists: a caller must
+    /// not delete it on the strength of `Ok` alone, and should first open
+    /// or read back the new files.
+    ///
+    /// Why not wait: 300 one-page files, measured with the timing test at
+    /// the end of `split/tests.rs`.
+    ///
+    /// | Waiting for the disk | Build container | Windows |
+    /// | --- | --- | --- |
+    /// | after each file | 5.6 s | 2.9 s |
+    /// | once at the end, for every file | 0.8 to 2.4 s | not measured |
+    /// | never | 11 to 24 ms | not measured |
+    ///
+    /// Waiting after each file is over 99% of the time of such a split.
+    /// Waiting once at the end (every file is put in place first, then
+    /// each is opened again and synced) would report the late errors and
+    /// make `Ok` mean "on the disk", and it was tried for that reason. It
+    /// still costs a wait per file, only a shorter one: the limit set for
+    /// it was half a second for this split, and its best run took 0.8 s
+    /// and most took over 2 s. So the split keeps the fast path and says
+    /// plainly, here and in the README, what `Ok` does not promise.
     ///
     /// # Cost
     ///
@@ -439,8 +462,8 @@ impl SplitPlan {
             //
             // Unsynced: this is the one place in the core that does not
             // wait for the disk, and "Not forced to the disk" above says
-            // why. A part can always be made again from the input, which
-            // no split ever writes to.
+            // why, with the numbers, and what it costs. A part can be made
+            // again from the input, which no split ever writes to.
             let saved = source
                 .part(pages)
                 .and_then(|mut part| save(&mut part, path, Durability::Unsynced));

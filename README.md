@@ -105,7 +105,12 @@ docker compose run --rm build cargo run --release -p danonpdf-cli -- merge --out
 - **Only pages travel.** A merged, extracted or split file holds the pages and what they use. Bookmarks, named destinations, form fields, the tagged structure and the document information (title, author) of the inputs are not carried over yet.
 - **Links to pages left out stop working.** When pages are extracted or split, a link to a page that is not in the new file stays on its page and leads nowhere. That page is not carried along in secret.
 - **A split file can be bigger than its share.** Each new file holds everything its pages point at, used or not. Some programs give every page the same list of all the fonts and images of the document; each file split from such a PDF carries all of them.
-- **After a power cut, repeat the split.** A merged or extracted file is made safe on the disk before the operation ends. The files of a split are not: waiting for the disk once per file was nearly all the time of a split into many files (300 one-page files took about 5 seconds in the build container with the wait and about 0.02 seconds without). If the power goes during a split or just after it, some of its files may be empty or incomplete. The input is never touched, so split again.
+- **A finished split is written, not yet safe on the disk.** A merged or extracted file is made safe on the disk before the operation ends, and a failure to get it there is reported. The files of a split are handed to the system and named, and the split reports success without waiting for the disk. So:
+  - If the power goes during a split or just after it, some of its files may be empty or incomplete.
+  - If the system cannot write a file out afterwards (a network share that went away, a quota, a full disk), no error is shown.
+  - The original is never touched, so the fix is to split again. **Keep the original until you have opened the new files**: do not delete it just because the split said it worked.
+
+  The reason is time. For 300 one-page files in the build container: about 5 seconds when waiting for the disk after each file, 1 to 2.5 seconds when waiting once at the end, and about 0.02 seconds without waiting.
 - **Password-protected files are refused.** A file that opens without a password is read like any other.
 
 ## Why local
