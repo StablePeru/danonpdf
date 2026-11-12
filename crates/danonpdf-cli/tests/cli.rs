@@ -12,9 +12,11 @@
 
 use std::ffi::OsStr;
 use std::fs::{self, File};
-use std::io::BufReader;
+use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::Duration;
 
 use lopdf::{Document, EncryptionState, EncryptionVersion, Object, Permissions, dictionary};
 use serde_json::{Value, json};
@@ -38,6 +40,37 @@ fn run(program: &mut Command) -> Output {
         .stdin(Stdio::null())
         .output()
         .expect("danonpdf-cli should start")
+}
+
+/// Starts `program`, an executable that this test copied a moment ago, and
+/// waits for it to end.
+///
+/// On Linux a file cannot be started while any process holds it open for
+/// writing: the start fails with "Text file busy" (ETXTBSY). The copy was
+/// closed before `fs::copy` returned, but the tests of this file run as
+/// threads of one process, and they start programs all the time. A child
+/// that another thread started while the copy was being written holds, for
+/// the moment between its `fork` and its `exec`, every file the test
+/// process had open then, the half-written copy among them. That moment
+/// cannot be seen or waited for from here, and it is short, so the start is
+/// tried again.
+///
+/// Any other error, and this one once the tries are used up, fails the
+/// test as it would in [`run`].
+fn run_a_fresh_copy(program: &mut Command) -> Output {
+    program.stdin(Stdio::null());
+    let mut tries_left = 100;
+    loop {
+        match program.output() {
+            // A guard on a `match` arm: the pattern has to match and the
+            // test after `if` has to hold.
+            Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy && tries_left > 0 => {
+                tries_left -= 1;
+                thread::sleep(Duration::from_millis(20));
+            }
+            result => return result.expect("the copy of danonpdf-cli should start"),
+        }
+    }
 }
 
 /// Runs `danonpdf-cli merge <flags> --output <output> <inputs>`.
@@ -243,6 +276,35 @@ fn encrypted(mut document: Document, user_password: &str) -> Document {
     let state = EncryptionState::try_from(version).unwrap();
     document.encrypt(&state).unwrap();
     document
+}
+
+/// The bytes of a PDF without its end: everything before the table that
+/// says where each object is (the cross-reference data), so that the
+/// table, the trailer and the pointer to the table are all gone.
+///
+/// The cut is read from the file itself and not counted in bytes from the
+/// end. A PDF ends with the keyword `startxref`, the position of the table
+/// as a number, and `%%EOF`; that number is where the cut goes. A fixture
+/// with one more page, or a version of lopdf that writes the table in
+/// another form, moves the table, and the test goes on cutting exactly
+/// this.
+fn without_its_end(bytes: &[u8]) -> &[u8] {
+    const KEYWORD: &[u8] = b"startxref";
+    // `windows` slides over the bytes, `KEYWORD.len()` at a time, and
+    // `rposition` searches from the end: where the last keyword starts.
+    let keyword = bytes
+        .windows(KEYWORD.len())
+        .rposition(|window| window == KEYWORD)
+        .expect("the fixture ends with startxref");
+    // The number is plain text: it is read as text and parsed.
+    let after = String::from_utf8_lossy(&bytes[keyword + KEYWORD.len()..]);
+    let table: usize = after
+        .split_whitespace()
+        .next()
+        .and_then(|number| number.parse().ok())
+        .expect("a position follows startxref");
+    assert!(table < keyword, "the table should come before its pointer");
+    &bytes[..table]
 }
 
 /// A document with one empty page, `width` by `height` points.
@@ -1553,12 +1615,12 @@ fn info_and_render_can_disagree_about_a_damaged_file() {
     let scratch = ScratchDir::new("render-disagree");
     let out = scratch.file("page.png");
 
-    // A file whose last bytes are gone: they hold the table that says
-    // where each object is. `info` finds the pages without it.
+    // A file whose end is gone: the table that says where each object is,
+    // and what follows it. `info` finds the pages without it.
     let whole = scratch.pdf("whole.pdf", 2);
     let bytes = fs::read(&whole).unwrap();
     let cut = scratch.file("cut.pdf");
-    fs::write(&cut, &bytes[..bytes.len() - 150]).unwrap();
+    fs::write(&cut, without_its_end(&bytes)).unwrap();
 
     assert_eq!(json_report(&info(&["--json"], &cut))["pages"], 2);
     let error = failure_of(
@@ -1689,7 +1751,7 @@ fn render_looks_for_the_library_next_to_the_program() {
             Some(value) => command.env(PDFIUM_DIR, value),
             None => command.env_remove(PDFIUM_DIR),
         };
-        run(&mut command)
+        run_a_fresh_copy(&mut command)
     };
 
     // The variable set to nothing counts as not set: the program looks in
@@ -1714,6 +1776,38 @@ fn render_looks_for_the_library_next_to_the_program() {
     assert_eq!(result.status.code(), Some(0), "{}", stdout(&result));
     assert_eq!(json_report(&result)["page"], 1);
     decode_png(&out);
+}
+
+#[test]
+fn a_relative_library_folder_is_reported_as_an_absolute_path() {
+    // AGENTS.md promises that `error.path` of `renderer_unavailable` is an
+    // absolute path, also when the variable names a relative folder. Only
+    // a run of the program can show it: the folder is taken from the
+    // current folder of the process, and each run has its own.
+    let scratch = ScratchDir::new("render-relative-library");
+    let input = scratch.pdf("in.pdf", 1);
+    let out = scratch.file("page.png");
+    let empty = scratch.file("no-library-here");
+    fs::create_dir(&empty).unwrap();
+
+    // One relative word in the variable, and the program started in the
+    // folder which that word is taken from.
+    let result = run(Command::new(env!("CARGO_BIN_EXE_danonpdf-cli"))
+        .args(render_args(&["--json"], "1", &out, &input))
+        .current_dir(&scratch.0)
+        .env(PDFIUM_DIR, "no-library-here"));
+
+    let error = failure_of(&result, "render", "renderer_unavailable");
+    let library = PathBuf::from(error["path"].as_str().unwrap());
+    assert!(library.is_absolute(), "{}", library.display());
+    // The folder is compared as the system resolves it: the temp folder
+    // may be reached through a link, and then the program and this test
+    // spell it differently.
+    assert_eq!(
+        fs::canonicalize(library.parent().unwrap()).unwrap(),
+        fs::canonicalize(&empty).unwrap()
+    );
+    assert!(!out.exists(), "nothing should be written");
 }
 
 #[test]

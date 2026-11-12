@@ -55,10 +55,17 @@ ARG PDFIUM_WIN_X64_SHA256=9a964261760cff52570aabf038ab346d3a5034dd8b30d0d5fe8861
 # - --connect-timeout, --max-time: 30 seconds to connect and 5 minutes for
 #   one attempt (the archives are about 4 MB each), so a connection that
 #   stalls ends as an error instead of hanging the build for ever.
-# - --retry: an attempt that fails for a reason that may pass (a timeout, a
-#   server error) is made again, up to 3 more times, 5 seconds apart. Each
-#   attempt starts the file from scratch. --retry-max-time ends the
-#   retrying after 15 minutes, whatever the count says.
+# - --retry: an attempt that fails is made again, up to 3 more times, 5
+#   seconds apart. Each attempt starts the file from scratch.
+#   --retry-max-time ends the retrying after 15 minutes, whatever the count
+#   says. By itself --retry only covers what curl calls transient (a
+#   timeout, a server error of the 5xx kind), so two more flags widen it:
+#   - --retry-connrefused: a connection that the server refuses, which is
+#     what a server being restarted looks like.
+#   - --retry-all-errors: every other failure, such as a connection cut in
+#     the middle of the file. It also retries failures that will not pass
+#     (a 404 for a release that does not exist): that costs 15 seconds
+#     before the same error is reported, and nothing else.
 # None of this decides whether a file is trusted: the SHA-256 check below
 # is still the only gate.
 RUN set -eu; \
@@ -69,6 +76,7 @@ RUN set -eu; \
             --proto '=https' --proto-redir '=https' \
             --connect-timeout 30 --max-time 300 \
             --retry 3 --retry-delay 5 --retry-max-time 900 \
+            --retry-connrefused --retry-all-errors \
             --output "$archive" "$base/$archive"; \
     done; \
     printf '%s  %s\n' \

@@ -109,7 +109,9 @@ It looks for that file in one folder only:
 1. The folder named by the environment variable `DANONPDF_PDFIUM_DIR`, when it is set and not empty. A relative folder is taken from the current folder.
 2. Otherwise, the folder the program itself is in. `dist/` is laid out that way: `danonpdf-cli.exe` next to `pdfium.dll`.
 
-Never the current folder, and never `PATH`. If the file is not there or cannot be loaded, the failure is `renderer_unavailable` and `error.path` is the file that was looked for, as an absolute path. Loading a library runs its code: only point the variable at a folder you trust as much as the program.
+Never the current folder, and never `PATH`. If the file is not there or cannot be loaded, the failure is `renderer_unavailable` and `error.path` is the file that was looked for, as an absolute path, also when the variable names a relative folder. Loading a library runs its code: only point the variable at a folder you trust as much as the program.
+
+One case has no `error.path`: the variable is not set and the program cannot tell which folder it is in, so there is no file to name. The code is still `renderer_unavailable`, and the fix is to set `DANONPDF_PDFIUM_DIR`.
 
 ### `info` and `render` can disagree
 
@@ -165,7 +167,7 @@ A failure has the same shape for every command:
 | `width`, `height` | The size in pixels of the image that was written (`render`). `width` can be below the `--width` asked for: see [Images](#images). |
 | `error.code` | One of the stable codes below. Decide on this. |
 | `error.message` | The reason, for people. The wording may change. |
-| `error.path` | The file the error is about, as given. The key is absent when there is none. For `renderer_unavailable` it is the library file that was looked for, as an absolute path. |
+| `error.path` | The file the error is about, as given. The key is absent when there is none. For `renderer_unavailable` it is the library file that was looked for, as an absolute path; the key is absent when the program could not tell which folder to look in (see [The PDFium library](#the-pdfium-library)). |
 | `error.written` | Only when a `split` stopped after writing some of its files: those files, in order. They are complete and are kept. The key is absent in every other failure. |
 
 A path that is not valid Unicode is written with replacement characters.
@@ -182,8 +184,8 @@ A path that is not valid Unicode is written with replacement characters.
 | `broken_pdf` | An input opened, but its structure is damaged. | Check `error.path`. |
 | `page_out_of_range` | `--pages` or `--page` names a page past the end of the document. | Run `info` to get the page count, then ask again. There is no `error.path`. |
 | `save_failed` | An output file, or the folder for it, could not be written. | Check that `error.path`, or its folder, can be written. After a `split`, look at `error.written` for files that are already there. |
-| `renderer_unavailable` | The PDFium library is missing or cannot be loaded. Only `render` reports it, and nothing is wrong with the input. | Put the library file where `error.path` says, or set `DANONPDF_PDFIUM_DIR` to its folder. The other commands still work. |
-| `render_failed` | PDFium could not draw the page and gave no reason that has a code of its own. Only `render` reports it. | Read `error.message`. Nothing in the command line is wrong; try another copy of the file. |
+| `renderer_unavailable` | The PDFium library is missing or cannot be loaded. Only `render` reports it, and nothing is wrong with the input. | Put the library file where `error.path` says, or set `DANONPDF_PDFIUM_DIR` to its folder. Without `error.path`, set the variable. The other commands still work. |
+| `render_failed` | The page was not drawn, and no other code says why: PDFium gave up on the file without a reason. Only `render` reports it. | Read `error.message`. Nothing in the command line is wrong (a `--width` that cannot be drawn is a usage error, exit code `2`, and never gets this far); try another copy of the file. |
 
 ## Rules it keeps
 

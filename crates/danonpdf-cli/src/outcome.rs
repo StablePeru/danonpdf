@@ -147,9 +147,21 @@ pub enum ErrorCode {
     /// The library that draws pages (PDFium) is missing or cannot be
     /// loaded. Nothing is wrong with the input, and only `render` needs
     /// that library.
+    ///
+    /// The failure names the library file that was looked for, with one
+    /// exception: when the program cannot tell which folder it runs from,
+    /// there is no file to name and the failure has no path. The way out
+    /// is then the variable that names the folder (`DANONPDF_PDFIUM_DIR`).
     RendererUnavailable,
-    /// The library that draws pages failed, without a reason that has a
-    /// code of its own.
+    /// The page was not drawn, and no other code says why. In practice:
+    /// PDFium gave up on the file without giving a reason.
+    ///
+    /// It is the code for whatever is left, so a failure that is not the
+    /// library's also lands here if it ever comes up from the core: a width
+    /// that cannot be drawn. This tool refuses such a width on the command
+    /// line (a usage error) before the core is called, which is why the
+    /// documentation can tell a caller that nothing in its command line is
+    /// wrong.
     RenderFailed,
 }
 
@@ -291,7 +303,9 @@ pub fn failure_from<P: AsRef<Path>>(error: &PdfError, inputs: &[P]) -> Failure {
 /// `read_failed` for `info` handles it for `render` with no new case. Two
 /// codes are new, for the two failures that only drawing has.
 pub fn render_failure_from(error: &RenderError, input: &Path) -> Failure {
-    let input = || Some(input.to_path_buf());
+    // The path for the errors that are about the file being drawn. A
+    // closure, so the path is only copied in the arms that use it.
+    let drawn_file = || Some(input.to_path_buf());
     // No `_ =>` arm, for the reason given in `failure_from`: a variant
     // added to `RenderError` must be given its code here before this crate
     // builds again.
@@ -302,7 +316,11 @@ pub fn render_failure_from(error: &RenderError, input: &Path) -> Failure {
         // about the input. `path` is the library file that was looked for.
         //
         // The first one has no file to name: the program could not tell
-        // which folder it runs from.
+        // which folder it runs from, so it never got as far as a file
+        // name. This is the one `renderer_unavailable` without a path, and
+        // AGENTS.md says so: the caller's way out is to name the folder in
+        // `DANONPDF_PDFIUM_DIR`, which is used instead of the program's
+        // own folder.
         RenderError::LibraryFolderUnknown { .. } => (ErrorCode::RendererUnavailable, None),
         RenderError::LibraryMissing { path } | RenderError::LibraryFailed { path, .. } => {
             (ErrorCode::RendererUnavailable, Some(path.clone()))
@@ -318,23 +336,28 @@ pub fn render_failure_from(error: &RenderError, input: &Path) -> Failure {
         // cannot be opened and one that is not a PDF alike, and the core
         // words both errors the same.
         RenderError::NotPdf { path } => (ErrorCode::ReadFailed, Some(path.clone())),
-        RenderError::Encrypted => (ErrorCode::Encrypted, input()),
+        RenderError::Encrypted => (ErrorCode::Encrypted, drawn_file()),
         // Protected in a way that PDFium cannot open, password or not.
         // `encrypted` and not `broken_pdf`: the file is not damaged, and
         // what a caller can do is what it does about a password it does
         // not have, which is to find a copy without the protection. The
         // other operations already report such a file as `encrypted`: for
         // them, every protected file that did not open is one.
-        RenderError::UnsupportedProtection => (ErrorCode::Encrypted, input()),
-        RenderError::Broken { .. } => (ErrorCode::BrokenPdf, input()),
+        RenderError::UnsupportedProtection => (ErrorCode::Encrypted, drawn_file()),
+        RenderError::Broken { .. } => (ErrorCode::BrokenPdf, drawn_file()),
         // About the page that was asked for, not about a file: no path.
         RenderError::PageOutOfRange { .. } => (ErrorCode::PageOutOfRange, None),
         // Not reached by this tool: the command line refuses such a width
-        // first, as a usage error. If it ever is, it is a page that was
-        // not drawn, told in the core's own sentence, and about no file.
+        // first, as a usage error (exit code 2), so no caller ever sees
+        // this arm. It still needs a code, because the `match` has no `_`
+        // arm. `render_failed` is the code for "not drawn, and no other
+        // code says why" (see `ErrorCode::RenderFailed`), and the message
+        // is the core's own sentence about the width. No path: the
+        // failure is about a number, not about a file. A new code for a
+        // case that cannot happen would be one more promise to keep.
         RenderError::WidthOutOfRange { .. } => (ErrorCode::RenderFailed, None),
         // PDFium gave up on this file without saying why.
-        RenderError::Engine { .. } => (ErrorCode::RenderFailed, input()),
+        RenderError::Engine { .. } => (ErrorCode::RenderFailed, drawn_file()),
         RenderError::Save { path, .. } => (ErrorCode::SaveFailed, Some(path.clone())),
     };
     Failure {

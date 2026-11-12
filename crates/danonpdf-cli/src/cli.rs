@@ -186,10 +186,14 @@ Error codes (stable: test for these, not for the message):
                      written
   renderer_unavailable
                      the PDFium library is missing or cannot be loaded;
-                     "path" is the library file that was looked for. Only
-                     render reports it, and nothing is wrong with the input
-  render_failed      PDFium could not draw the page and gave no reason that
-                     has a code of its own. Only render reports it"#;
+                     "path" is the library file that was looked for, as an
+                     absolute path, and is left out when the program cannot
+                     tell which folder to look in (set DANONPDF_PDFIUM_DIR
+                     then). Only render reports it, and nothing is wrong
+                     with the input
+  render_failed      the page was not drawn and no other code says why:
+                     PDFium gave up on the file without a reason. Only
+                     render reports it"#;
 
 // Shown under the short help (`-h`), which leaves the contract out.
 const HELP_POINTER: &str =

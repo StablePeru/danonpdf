@@ -64,6 +64,41 @@ fn change_pages(document: &mut Document, change: impl Fn(&mut lopdf::Dictionary)
     }
 }
 
+/// Saves `document` into `scratch` as `cut.pdf` without its end, and
+/// returns the path: everything from the table that says where each object
+/// is (the cross-reference data) is left out, so the table, the trailer
+/// and the pointer to the table are all gone.
+///
+/// The cut is read from the file itself and not counted in bytes from the
+/// end. A PDF ends with the keyword `startxref`, the position of the table
+/// as a number, and `%%EOF`; that number is where the cut goes. A fixture
+/// with one more page, or a version of lopdf that writes the table in
+/// another form, moves the table, and the tests go on cutting exactly
+/// this.
+fn cut_short(scratch: &ScratchDir, document: Document) -> PathBuf {
+    const KEYWORD: &[u8] = b"startxref";
+    let whole = scratch.save("whole.pdf", document);
+    let bytes = fs::read(&whole).unwrap();
+    // `windows` slides over the bytes, `KEYWORD.len()` at a time, and
+    // `rposition` searches from the end: where the last keyword starts.
+    let keyword = bytes
+        .windows(KEYWORD.len())
+        .rposition(|window| window == KEYWORD)
+        .expect("the fixture ends with startxref");
+    // The number is plain text: it is read as text and parsed.
+    let after = String::from_utf8_lossy(&bytes[keyword + KEYWORD.len()..]);
+    let table: usize = after
+        .split_whitespace()
+        .next()
+        .and_then(|number| number.parse().ok())
+        .expect("a position follows startxref");
+    assert!(table < keyword, "the table should come before its pointer");
+
+    let path = scratch.file("cut.pdf");
+    fs::write(&path, &bytes[..table]).unwrap();
+    path
+}
+
 /// Reads a PNG file back: its width, its height and its RGBA bytes.
 fn decode_png(path: &Path) -> (u32, u32, Vec<u8>) {
     let decoder = png::Decoder::new(BufReader::new(File::open(path).unwrap()));
@@ -415,13 +450,10 @@ fn a_page_that_is_missing_from_the_file_is_damage() {
 
 #[test]
 fn a_file_cut_short_can_be_counted_and_cannot_be_drawn() {
-    // The last 150 bytes hold the table that says where each object is.
+    // The end of the file holds the table that says where each object is.
     // lopdf finds the objects without it; PDFium gives up.
     let scratch = ScratchDir::new("render-cut-short");
-    let whole = scratch.save("whole.pdf", with_pages("A", 2));
-    let bytes = fs::read(&whole).unwrap();
-    let input = scratch.file("cut.pdf");
-    fs::write(&input, &bytes[..bytes.len() - 150]).unwrap();
+    let input = cut_short(&scratch, with_pages("A", 2));
 
     let counted = crate::page_count(&input);
     let drawn = renderer().render_page(&input, page(1), 100);
