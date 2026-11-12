@@ -148,6 +148,16 @@ pub fn exists_after_adding_extension(output_name: &str) -> String {
     )
 }
 
+// Split view: extracting
+
+/// The file name the save dialog proposes for an extraction from a file
+/// whose name, without its extension, is `input_stem`: "report-pages.pdf"
+/// for "report.pdf". Numbered like any other proposal when it is taken (see
+/// [`numbered_name`]).
+pub fn extract_output_name(input_stem: &str) -> String {
+    format!("{input_stem}-pages.pdf")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,5 +226,17 @@ mod tests {
     fn merged_uses_singular_for_one_page() {
         assert_eq!(merged(1, "a.pdf"), "Merged 1 page into a.pdf.");
         assert_eq!(merged(12, "a.pdf"), "Merged 12 pages into a.pdf.");
+    }
+
+    // Split view
+
+    #[test]
+    fn extract_output_name_adds_pages_to_the_input_name() {
+        assert_eq!(extract_output_name("report"), "report-pages.pdf");
+        // Numbered like every other proposal.
+        assert_eq!(
+            numbered_name(&extract_output_name("report"), 2),
+            "report-pages (2).pdf"
+        );
     }
 }

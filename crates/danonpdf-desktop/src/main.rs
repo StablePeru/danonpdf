@@ -7,6 +7,14 @@
 mod app;
 mod merge_list;
 mod paths;
+// The state of the Split view. Nothing draws it yet (the view arrives in
+// the next commit), so until then the compiler is told not to report it
+// as unused.
+#[allow(dead_code)]
+mod split_form;
+// Only compiled for `cargo test`: helpers that build real PDFs for tests.
+#[cfg(test)]
+mod test_support;
 mod texts;
 
 use eframe::egui;
