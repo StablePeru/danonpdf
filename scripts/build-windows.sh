@@ -104,19 +104,38 @@ gui_description=$description
 verify "$release/danonpdf-cli.exe" console "cargo finished but "
 cli_description=$description
 
+# Where the three files end up. Each name is written once, here: the
+# cleanup below and the copies at the end both read it from these
+# variables, so the cleanup can never look for a file that the copies no
+# longer make, or miss one that they do.
+dist_dll=dist/pdfium.dll
+dist_gui=dist/danonpdf.exe
+dist_cli=dist/danonpdf-cli.exe
+
+# The temporary name under which a file is copied before it gets the name
+# $1. The one place that knows what such a name looks like.
+temporary_name() {
+    printf '%s.new' "$1"
+}
+
 # Copies the file $1 to $2 under a temporary name and renames it into
 # place. A copy takes time and a rename does not: if the script is stopped
 # halfway, $2 is the old file or the new one, never the first half of one.
 install_file() {
-    cp "$1" "$2.new"
-    mv -f "$2.new" "$2"
+    local temporary
+    temporary=$(temporary_name "$2")
+    cp "$1" "$temporary"
+    mv -f "$temporary" "$2"
 }
 
 mkdir -p dist/licenses
 # Left over from a run that was stopped during the steps below. Only the
-# temporary names that this script itself gives out: dist/ belongs to the
+# temporary names that this script itself gives out, which are those of
+# the three files that `install_file` is called for: dist/ belongs to the
 # user too, and a file of theirs that happens to end in ".new" stays.
-rm -f dist/pdfium.dll.new dist/danonpdf.exe.new dist/danonpdf-cli.exe.new
+for destination in "$dist_dll" "$dist_gui" "$dist_cli"; do
+    rm -f "$(temporary_name "$destination")"
+done
 rm -rf dist/licenses/pdfium.new
 
 # Says, when the script ends, that dist/ was left incomplete, if that is
@@ -160,16 +179,16 @@ cp -r "$pdfium/LICENSE" "$pdfium/VERSION" "$pdfium/licenses" dist/licenses/pdfiu
 # Up to here dist/ still holds an earlier build, whole. From the next line
 # on it does not, until the last file is in place.
 dist_is_incomplete=true
-rm -f dist/pdfium.dll
+rm -f "$dist_dll"
 rm -rf dist/licenses/pdfium
 mv dist/licenses/pdfium.new dist/licenses/pdfium
-install_file "$pdfium/bin/pdfium.dll" dist/pdfium.dll
+install_file "$pdfium/bin/pdfium.dll" "$dist_dll"
 
-install_file "$release/danonpdf.exe" dist/danonpdf.exe
-install_file "$release/danonpdf-cli.exe" dist/danonpdf-cli.exe
+install_file "$release/danonpdf.exe" "$dist_gui"
+install_file "$release/danonpdf-cli.exe" "$dist_cli"
 dist_is_incomplete=false
 
-echo "Built dist/danonpdf.exe: $gui_description"
-echo "Built dist/danonpdf-cli.exe: $cli_description"
-echo "Copied dist/pdfium.dll: $dll_description"
+echo "Built $dist_gui: $gui_description"
+echo "Built $dist_cli: $cli_description"
+echo "Copied $dist_dll: $dll_description"
 echo "Copied dist/licenses/pdfium/: the licence texts of PDFium and of what it bundles"

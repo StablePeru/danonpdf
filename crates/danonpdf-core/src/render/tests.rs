@@ -76,6 +76,9 @@ fn change_pages(document: &mut Document, change: impl Fn(&mut lopdf::Dictionary)
 /// with one more page, or a version of lopdf that writes the table in
 /// another form, moves the table, and the tests go on cutting exactly
 /// this.
+///
+/// The same cut is made by `without_its_end` in
+/// `crates/danonpdf-cli/tests/cli.rs`: change the two together.
 fn cut_short(scratch: &ScratchDir, document: Document) -> PathBuf {
     const KEYWORD: &[u8] = b"startxref";
     let whole = scratch.save("whole.pdf", document);

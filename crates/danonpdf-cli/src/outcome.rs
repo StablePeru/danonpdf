@@ -577,6 +577,37 @@ mod tests {
     }
 
     #[test]
+    fn a_library_folder_that_is_unknown_is_renderer_unavailable_without_a_path() {
+        // AGENTS.md promises this case to callers by name: the one
+        // `renderer_unavailable` whose report has no `error.path`, because
+        // the program never got as far as a file to name. The table above
+        // has it as one row among thirteen; here it stands alone, next to
+        // its nearest neighbour, so that the promise fails under its own
+        // name if it is ever broken.
+        let input = Path::new("report.pdf");
+        let unknown = RenderError::LibraryFolderUnknown {
+            source: io::Error::other("the path of the program has no folder"),
+        };
+
+        let failure = render_failure_from(&unknown, input);
+
+        assert_eq!(failure.code, ErrorCode::RendererUnavailable);
+        // Not the library, which has no known place, and not the input
+        // either: nothing is wrong with the file that was to be drawn.
+        assert_eq!(failure.path, None);
+        assert_eq!(failure.message, error_chain(&unknown));
+
+        // The same code with the library looked for and not found: that
+        // one does name a file.
+        let missing = RenderError::LibraryMissing {
+            path: PathBuf::from("app/pdfium.dll"),
+        };
+        let failure = render_failure_from(&missing, input);
+        assert_eq!(failure.code, ErrorCode::RendererUnavailable);
+        assert_eq!(failure.path.as_deref(), Some(Path::new("app/pdfium.dll")));
+    }
+
+    #[test]
     fn a_render_error_reads_as_the_other_operations_would_put_it() {
         // The same code, the same sentence and the same path for the same
         // trouble, whichever command met it: a caller needs no case of its

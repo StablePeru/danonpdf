@@ -42,8 +42,12 @@ fn a_relative_folder_is_remembered_as_a_full_path() {
     // Where the process says it stands now. Not `above` itself: the system
     // answers with the real folder, which is spelled differently when
     // `above` is reached through a symbolic link or holds a `..`. The core
-    // builds the full path from this same answer, so this is what a correct
-    // core gives, however the folder that was set is spelled.
+    // builds the full path from this same answer, so this is the folder a
+    // correct core remembers, however the folder that was set is spelled.
+    //
+    // That is all this line settles: the assertion on the remembered path
+    // just below. The two calls further down that open `real` use the
+    // folder as it was first spelled, and say there what they rely on.
     let expected = env::current_dir().unwrap().join(relative);
 
     let first = Renderer::open(relative).unwrap();
@@ -57,6 +61,14 @@ fn a_relative_folder_is_remembered_as_a_full_path() {
     );
     assert_eq!(first.library().parent(), Some(expected.as_path()));
     // Asked again, in the same words and in full: the same engine.
+    //
+    // `real` is the folder as it was first spelled, which is not always
+    // the spelling the core remembered (`expected`): through a link, or
+    // with a `..`, the two differ. The call still gives the loaded engine,
+    // because the core then asks the disk whether both name one file. So
+    // what is compared is the path the engine reports, never `real` with
+    // it. To see it hold, run this test with `DANONPDF_PDFIUM_DIR` set to
+    // a symbolic link to the library folder, or to a path with a `..`.
     assert_eq!(Renderer::open(relative).unwrap().library(), first.library());
     assert_eq!(Renderer::open(&real).unwrap().library(), first.library());
 
@@ -68,7 +80,8 @@ fn a_relative_folder_is_remembered_as_a_full_path() {
     let _back = BackTo(above.to_path_buf());
     env::set_current_dir(elsewhere.path()).unwrap();
 
-    // The loaded library is still recognised by its full path...
+    // The loaded library is still recognised by its full path (as first
+    // spelled: see above)...
     let after_the_move = Renderer::open(&real);
     assert!(
         after_the_move.is_ok(),

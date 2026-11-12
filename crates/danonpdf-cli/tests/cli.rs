@@ -288,6 +288,9 @@ fn encrypted(mut document: Document, user_password: &str) -> Document {
 /// with one more page, or a version of lopdf that writes the table in
 /// another form, moves the table, and the test goes on cutting exactly
 /// this.
+///
+/// The same cut is made by `cut_short` in
+/// `crates/danonpdf-core/src/render/tests.rs`: change the two together.
 fn without_its_end(bytes: &[u8]) -> &[u8] {
     const KEYWORD: &[u8] = b"startxref";
     // `windows` slides over the bytes, `KEYWORD.len()` at a time, and
