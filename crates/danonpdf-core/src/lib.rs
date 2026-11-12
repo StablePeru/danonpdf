@@ -9,7 +9,7 @@ mod paths;
 // write `danonpdf_core::merge_files` and not the longer path.
 pub use errors::error_chain;
 pub use merge::{MergeError, merge_documents, merge_files};
-pub use paths::same_file;
+pub use paths::{name_is_taken, same_file};
 
 use std::path::Path;
 

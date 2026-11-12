@@ -59,6 +59,8 @@ Exit codes:
   0  the operation succeeded
   1  the operation was refused or failed
   2  the command line was wrong (usage error)
+  If the report cannot be written (stdout or stderr is closed, or the disk
+  is full), the line is dropped and the exit code still tells the result.
 
 Output without --json:
   success  one line on stdout
@@ -81,7 +83,9 @@ Output with --json:
 Error codes (stable: test for these, not for the message):
   output_is_input  the output is one of the inputs
   output_exists    the output already exists and --force was not given
-  no_inputs        there was nothing to merge
+  no_inputs        there was nothing to merge; never reported by this
+                   command line, which refuses fewer than two inputs first
+                   as a usage error (exit code 2, plain text on stderr)
   read_failed      an input could not be read, or is not a PDF
   encrypted        an input needs a password
   broken_pdf       an input opened, but its structure is damaged

@@ -1,8 +1,10 @@
 //! Rules about file paths that every front end must apply the same way.
 //!
 //! The window and the command-line tool both refuse to write the merged file
-//! over one of the files being merged. If each kept its own idea of "the same
-//! file", they would drift apart; here there is one, and both call it.
+//! over one of the files being merged, and both hold back before replacing a
+//! file nobody agreed to replace. If each kept its own idea of "the same
+//! file" or of "this name is in use", they would drift apart; here there is
+//! one of each, and both call it.
 
 use std::fs;
 use std::path::Path;
@@ -38,6 +40,27 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
     }
+}
+
+/// Whether something already has the name `path`: a file, a folder or a
+/// link. Saving there would replace it.
+///
+/// Not [`Path::exists`], although it looks like the same question. `exists`
+/// follows links and asks about the file at the end, so it answers `false`
+/// for a link whose target is gone. The name is still in use: a save would
+/// replace the link itself. `fs::symlink_metadata` looks at the name and
+/// follows nothing, so it finds the link.
+///
+/// If the system cannot tell (a folder on the way that cannot be read, for
+/// example), the name counts as free. The save that follows then fails for
+/// that same reason and reports it, which says more than "it exists" would.
+///
+/// The answer is only true for the moment it is given: another program can
+/// take the name right afterwards. Both front ends accept that gap; closing
+/// it would need a "rename, but only if the name is free" that std does not
+/// offer on every system.
+pub fn name_is_taken(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
 }
 
 #[cfg(test)]
@@ -102,5 +125,42 @@ mod tests {
         fs::remove_dir_all(&folder).unwrap();
 
         assert!(!result);
+    }
+
+    #[test]
+    fn a_name_is_taken_by_a_file_or_a_folder_and_free_otherwise() {
+        let folder = fresh_folder("name-taken");
+        let file = folder.join("report.pdf");
+        fs::write(&file, b"x").unwrap();
+        let subfolder = folder.join("scans");
+        fs::create_dir(&subfolder).unwrap();
+
+        let results = (
+            name_is_taken(&file),
+            // A folder holds the name just as well: nothing can be saved
+            // under it either.
+            name_is_taken(&subfolder),
+            name_is_taken(&folder.join("new.pdf")),
+        );
+        fs::remove_dir_all(&folder).unwrap();
+
+        assert_eq!(results, (true, true, false));
+    }
+
+    // Links only exist in this form on Unix-like systems; creating one on
+    // Windows needs a different function and, often, special rights.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_is_taken_by_a_link_even_when_its_target_is_gone() {
+        let folder = fresh_folder("dangling-link");
+        let link = folder.join("report.pdf");
+        std::os::unix::fs::symlink(folder.join("gone.pdf"), &link).unwrap();
+
+        // `exists` follows the link, finds nothing, and says no. That is
+        // the wrong answer to "may I save under this name?".
+        let results = (link.exists(), name_is_taken(&link));
+        fs::remove_dir_all(&folder).unwrap();
+
+        assert_eq!(results, (false, true));
     }
 }

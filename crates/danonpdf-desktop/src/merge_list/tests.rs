@@ -470,6 +470,28 @@ fn merge_into_does_not_replace_a_file_named_only_by_the_added_extension() {
     );
 }
 
+// Links only exist in this form on Unix-like systems; creating one on
+// Windows needs a different function and, often, special rights.
+#[cfg(unix)]
+#[test]
+fn merge_into_does_not_replace_a_link_to_nothing_named_only_by_the_added_extension() {
+    // "report.pdf" is a link whose target is gone. Asking whether the file
+    // behind it exists says no, yet the name is in use: saving there would
+    // replace the link, and nobody was asked.
+    let folder = fresh_folder("added-extension-dangling-link");
+    let mut list = list_of_two_real_pdfs(&folder);
+    let link = folder.join("report.pdf");
+    std::os::unix::fs::symlink(folder.join("gone.pdf"), &link).unwrap();
+
+    list.merge_into(folder.join("report"));
+    let still_a_link = fs::symlink_metadata(&link).is_ok_and(|entry| entry.is_symlink());
+    let status = list.status().clone();
+    fs::remove_dir_all(&folder).unwrap();
+
+    assert!(still_a_link, "the link was replaced");
+    assert_eq!(status, Status::ExistsAfterAddingExtension { output: link });
+}
+
 #[test]
 fn merge_into_replaces_an_existing_file_chosen_by_its_full_name() {
     // The dialog asked "replace report.pdf?" for this exact name and the

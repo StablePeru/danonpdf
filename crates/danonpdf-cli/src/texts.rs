@@ -59,8 +59,15 @@ pub fn error_line(message: &str) -> String {
 
 /// Why the command line was refused: a merge needs `needed` inputs and only
 /// `given` were named. clap prints it after its own "error: ".
+///
+/// Only the verb follows a count here. "input files" stays plural because
+/// `needed` is the minimum for a merge, which is never below two.
 pub fn too_few_inputs(needed: usize, given: usize) -> String {
-    format!("merge needs at least {needed} input files; only {given} was given")
+    let verb = match given {
+        1 => "was",
+        _ => "were",
+    };
+    format!("merge needs at least {needed} input files; only {given} {verb} given")
 }
 
 #[cfg(test)]
@@ -103,11 +110,24 @@ mod tests {
 
     #[test]
     fn too_few_inputs_says_how_many_are_needed_and_how_many_came() {
-        // clap already refuses a merge with no input at all, so the only
-        // count that reaches this sentence today is 1: "was" is right.
         assert_eq!(
             too_few_inputs(2, 1),
             "merge needs at least 2 input files; only 1 was given"
+        );
+    }
+
+    #[test]
+    fn too_few_inputs_uses_the_plural_unless_exactly_one_came() {
+        // clap already refuses a merge with no input at all, so 0 does not
+        // reach this sentence today. It must still read right if the
+        // minimum ever grows, or if that check moves here.
+        assert_eq!(
+            too_few_inputs(2, 0),
+            "merge needs at least 2 input files; only 0 were given"
+        );
+        assert_eq!(
+            too_few_inputs(3, 2),
+            "merge needs at least 3 input files; only 2 were given"
         );
     }
 

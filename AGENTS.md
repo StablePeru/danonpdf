@@ -32,6 +32,8 @@ Put `--` before the inputs if one of them starts with `-`.
 | `1` | Refused or failed. | One JSON object on stdout. | `error: ...` on stderr, nothing on stdout. |
 | `2` | Wrong command line. | Plain text on stderr, not JSON. | Plain text on stderr. |
 
+If the report cannot be written (stdout or stderr is closed, or the disk is full), the line is dropped and the exit code still tells the result.
+
 With `--json`, stdout holds exactly one object on one line and stderr stays empty, for codes `0` and `1`:
 
 ```text
@@ -56,7 +58,7 @@ A path that is not valid Unicode is written with replacement characters.
 | --- | --- | --- |
 | `output_is_input` | The output is one of the inputs. | Choose another output. `--force` does not help. |
 | `output_exists` | The output already exists. | Choose another output, or pass `--force` if replacing it is intended. |
-| `no_inputs` | There was nothing to merge. | Pass at least two inputs. |
+| `no_inputs` | There was nothing to merge. | Nothing: this command line never reports it. Fewer than two inputs is refused first as a usage error (exit code `2`, plain text on stderr). The code is listed because it is part of the contract. |
 | `read_failed` | An input is missing, unreadable or not a PDF. | Check `error.path`. |
 | `encrypted` | An input needs a password. | Not supported; use an unlocked copy. |
 | `broken_pdf` | An input opened, but its structure is damaged. | Check `error.path`. |

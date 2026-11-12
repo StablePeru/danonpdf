@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use danonpdf_core::{MergeError, error_chain, is_pdf_path, merge_files, same_file};
+use danonpdf_core::{MergeError, error_chain, is_pdf_path, merge_files, name_is_taken, same_file};
 
 use crate::texts;
 
@@ -228,7 +228,11 @@ impl MergeList {
         // never confirmed, so refuse instead of replacing it silently. On
         // Windows the dialog adds ".pdf" itself, so this only fires on
         // systems whose dialog returns the name as typed, such as Linux.
-        if output != typed && output.exists() {
+        //
+        // `name_is_taken` is the core's rule, the one the command-line tool
+        // uses for `--force`. Unlike `Path::exists` it also says yes for a
+        // link whose target is gone: saving would replace that link too.
+        if output != typed && name_is_taken(&output) {
             self.status = Status::ExistsAfterAddingExtension { output };
             return;
         }

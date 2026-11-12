@@ -467,8 +467,11 @@ fn help_teaches_the_whole_contract() {
         for expected in [
             // An example to copy.
             "danonpdf-cli merge --json --output merged.pdf first.pdf second.pdf",
-            // The exit codes.
+            // The exit codes, and what happens to a report nobody can read.
             "Exit codes:",
+            "If the report cannot be written",
+            // The one code this command line can never produce says so.
+            "no_inputs        there was nothing to merge; never reported by this",
             // Both JSON shapes.
             r#"{"ok":true,"operation":"merge","output":"merged.pdf","inputs":2,"pages":12}"#,
             r#"{"ok":false,"operation":"merge","error":{"code":"output_exists","#,

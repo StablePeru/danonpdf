@@ -8,10 +8,9 @@
 //! There is no PDF logic here either: joining the files is the core's job.
 //! This module only adds the two rules about what may be written where.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
-use danonpdf_core::{MergeError, error_chain, merge_files, same_file};
+use danonpdf_core::{MergeError, error_chain, merge_files, name_is_taken, same_file};
 
 use crate::texts;
 
@@ -122,7 +121,9 @@ pub fn run(inputs: &[PathBuf], output: &Path, force: bool) -> Result<MergeReport
             path: Some(output.to_path_buf()),
         });
     }
-    if !force && is_taken(output) {
+    // Also the core's rule, and also shared with the window: a name counts
+    // as taken even when it is only a link whose target is gone.
+    if !force && name_is_taken(output) {
         return Err(Failure {
             code: ErrorCode::OutputExists,
             message: texts::output_exists(output),
@@ -139,17 +140,6 @@ pub fn run(inputs: &[PathBuf], output: &Path, force: bool) -> Result<MergeReport
             pages,
         })
         .map_err(|error| failure_from(&error, inputs))
-}
-
-/// Whether something already has the name `path`.
-///
-/// Not `Path::exists`: that follows links, so it answers `false` for a link
-/// whose target is gone, and the save would then replace the link without
-/// `--force`. `symlink_metadata` looks at the name itself. If it fails for
-/// another reason (a folder on the way that cannot be read, say), the name
-/// counts as free and the save reports the real problem.
-fn is_taken(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok()
 }
 
 /// Turns the core's error into the tool's failure: a stable code, the whole
