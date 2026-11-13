@@ -132,6 +132,8 @@ fn human_line(report: &Report) -> String {
             width,
             height,
         } => texts::rendered(*page, *width, *height, output),
+        Report::Rotate { output, pages } => texts::rotated(*pages, output),
+        Report::Delete { output, pages } => texts::deleted(*pages, output),
     }
 }
 
@@ -159,7 +161,7 @@ struct SuccessJson<'a> {
 /// The fields that each operation adds to [`SuccessJson`], in the order
 /// they are written.
 ///
-/// It mirrors [`Report`], with every path already turned into text. A
+/// It follows [`Report`], with every path already turned into text. A
 /// separate type keeps the choice of JSON keys and their order in this
 /// module, away from the values the operations return.
 ///
@@ -178,7 +180,10 @@ enum DetailsJson<'a> {
         input: Cow<'a, str>,
         pages: usize,
     },
-    Extract {
+    /// What `extract`, `rotate` and `delete` report: each writes one new
+    /// file out of one input, and has the same two things to say about it.
+    /// One variant for the three, so their objects cannot drift apart.
+    NewFile {
         output: Cow<'a, str>,
         pages: usize,
     },
@@ -219,7 +224,11 @@ impl<'a> DetailsJson<'a> {
                 input: lossy(input),
                 pages: *pages,
             },
-            Report::Extract { output, pages } => Self::Extract {
+            // `|` joins three patterns into one arm. That is allowed
+            // because each of them binds the same names to the same types.
+            Report::Extract { output, pages }
+            | Report::Rotate { output, pages }
+            | Report::Delete { output, pages } => Self::NewFile {
                 output: lossy(output),
                 pages: *pages,
             },
@@ -389,6 +398,20 @@ mod tests {
                 },
                 "Rendered page 3 (1024 by 1449 pixels) into page.png",
             ),
+            (
+                Report::Rotate {
+                    output: PathBuf::from("out.pdf"),
+                    pages: 5,
+                },
+                "Rotated the chosen pages; out.pdf has 5 pages",
+            ),
+            (
+                Report::Delete {
+                    output: PathBuf::from("out.pdf"),
+                    pages: 3,
+                },
+                "Deleted the chosen pages; out.pdf has 3 pages",
+            ),
         ];
         for (report, line) in cases {
             // The operation only matters for JSON; any one will do here.
@@ -461,6 +484,29 @@ mod tests {
     }
 
     #[test]
+    fn json_rotate_and_delete_have_the_shape_of_an_extract() {
+        // The three write one new file out of one input, and say the same
+        // two things about it. Only the name of the operation differs.
+        let rotate = Report::Rotate {
+            output: PathBuf::from("out.pdf"),
+            pages: 5,
+        };
+        let delete = Report::Delete {
+            output: PathBuf::from("out.pdf"),
+            pages: 3,
+        };
+
+        assert_eq!(
+            json_success(Operation::Rotate, rotate),
+            r#"{"ok":true,"operation":"rotate","output":"out.pdf","pages":5}"#
+        );
+        assert_eq!(
+            json_success(Operation::Delete, delete),
+            r#"{"ok":true,"operation":"delete","output":"out.pdf","pages":3}"#
+        );
+    }
+
+    #[test]
     fn json_split_has_the_documented_shape() {
         let report = Report::Split {
             outputs: vec![
@@ -520,6 +566,8 @@ mod tests {
             Operation::Extract,
             Operation::Split,
             Operation::Render,
+            Operation::Rotate,
+            Operation::Delete,
         ] {
             let line = render(operation, &failure(None), Format::Json)
                 .stdout

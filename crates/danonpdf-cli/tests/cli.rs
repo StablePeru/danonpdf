@@ -73,6 +73,17 @@ fn run_a_fresh_copy(program: &mut Command) -> Output {
     }
 }
 
+/// Runs `danonpdf-cli` with `args` from inside `folder`, so that a relative
+/// path among them is looked up there.
+fn cli_in(folder: &Path, args: &[&OsStr]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_danonpdf-cli"))
+        .args(args)
+        .current_dir(folder)
+        .stdin(Stdio::null())
+        .output()
+        .expect("danonpdf-cli should start")
+}
+
 /// Runs `danonpdf-cli merge <flags> --output <output> <inputs>`.
 fn merge(flags: &[&str], output: &Path, inputs: &[&Path]) -> Output {
     let mut args: Vec<&OsStr> = vec![OsStr::new("merge")];
@@ -159,6 +170,33 @@ fn render_with_library(
     run(Command::new(env!("CARGO_BIN_EXE_danonpdf-cli"))
         .args(render_args(flags, page, output, input))
         .env(PDFIUM_DIR, library_folder))
+}
+
+/// Runs `danonpdf-cli rotate <flags> --degrees <degrees> --output <output>
+/// <input>`. To turn only some pages, put `"--pages", "..."` among the
+/// flags.
+fn rotate(flags: &[&str], degrees: &str, output: &Path, input: &Path) -> Output {
+    let mut args: Vec<&OsStr> = vec![OsStr::new("rotate")];
+    args.extend(flags.iter().map(OsStr::new));
+    args.push(OsStr::new("--degrees"));
+    args.push(OsStr::new(degrees));
+    args.push(OsStr::new("--output"));
+    args.push(output.as_os_str());
+    args.push(input.as_os_str());
+    cli(&args)
+}
+
+/// Runs `danonpdf-cli delete <flags> --pages <pages> --output <output>
+/// <input>`.
+fn delete(flags: &[&str], pages: &str, output: &Path, input: &Path) -> Output {
+    let mut args: Vec<&OsStr> = vec![OsStr::new("delete")];
+    args.extend(flags.iter().map(OsStr::new));
+    args.push(OsStr::new("--pages"));
+    args.push(OsStr::new(pages));
+    args.push(OsStr::new("--output"));
+    args.push(output.as_os_str());
+    args.push(input.as_os_str());
+    cli(&args)
 }
 
 /// What the program wrote to stdout, as text.
@@ -258,6 +296,18 @@ fn with_pages(page_count: i64) -> Document {
     document.objects.insert(pages_id, Object::Dictionary(pages));
     let catalog_id = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
     document.trailer.set("Root", catalog_id);
+    document
+}
+
+/// `document` with a `/Rotate` of `degrees` on its page `number` (counted
+/// from 1): that page is shown turned by so much to the right.
+fn rotated(mut document: Document, number: u32, degrees: i64) -> Document {
+    // `get_pages` gives the pages by their number, from 1.
+    let page_id = document.get_pages()[&number];
+    document
+        .get_dictionary_mut(page_id)
+        .unwrap()
+        .set("Rotate", degrees);
     document
 }
 
@@ -364,6 +414,23 @@ fn page_widths(path: &Path) -> Vec<i64> {
             let page = document.get_dictionary(page_id).unwrap();
             let media_box = page.get(b"MediaBox").unwrap().as_array().unwrap();
             media_box[2].as_i64().unwrap()
+        })
+        .collect()
+}
+
+/// The `/Rotate` of every page of the PDF at `path`, in page order: `None`
+/// for a page that has none, which is a page shown as it is.
+fn page_rotations(path: &Path) -> Vec<Option<i64>> {
+    let document = Document::load(path).unwrap();
+    document
+        .page_iter()
+        .map(|page_id| {
+            let page = document.get_dictionary(page_id).unwrap();
+            // `ok` turns "no such key" into `None`; a `/Rotate` that is
+            // there must be a whole number, or the test fails here.
+            page.get(b"Rotate")
+                .ok()
+                .map(|value| value.as_i64().unwrap())
         })
         .collect()
 }
@@ -606,7 +673,7 @@ fn encrypted_input_is_reported_with_its_path() {
     assert!(!out.exists(), "nothing should be written");
 }
 
-/// What `info`, `extract` and `split` say about a file that needs a
+/// What every command but `merge` says about a file that needs a
 /// password. They read one file, so there is no "input 1" to speak of:
 /// that wording belongs to `merge`, which takes a list.
 const THE_FILE_IS_ENCRYPTED: &str = "the file is encrypted and needs a password";
@@ -691,7 +758,7 @@ fn version_prints_the_name_and_the_version() {
 #[test]
 fn help_teaches_the_whole_contract() {
     // Every way to ask; an agent that has never seen the tool may try any.
-    let asks: [&[&str]; 11] = [
+    let asks: [&[&str]; 15] = [
         &["--help"],
         &["help", "merge"],
         &["merge", "--help"],
@@ -703,6 +770,10 @@ fn help_teaches_the_whole_contract() {
         &["split", "--help"],
         &["help", "render"],
         &["render", "--help"],
+        &["help", "rotate"],
+        &["rotate", "--help"],
+        &["help", "delete"],
+        &["delete", "--help"],
     ];
     for ask in asks {
         let args: Vec<&OsStr> = ask.iter().map(OsStr::new).collect();
@@ -729,7 +800,13 @@ fn help_teaches_the_whole_contract() {
             "pdfium.dll on Windows",
             "libpdfium.so on Linux",
             "DANONPDF_PDFIUM_DIR",
-            "merge, info, extract and split do not need it",
+            "merge, info, extract, split, rotate and delete do not need it",
+            "danonpdf-cli rotate --json --degrees 90 --pages 5- --output up.pdf report.pdf",
+            "danonpdf-cli delete --json --pages 2,5-6 --output shorter.pdf report.pdf",
+            // Reordering has no command of its own: the help says which
+            // one does it, with an example.
+            "extract is also how pages are reordered",
+            "danonpdf-cli extract --json --pages 3,1,2,4- --output moved.pdf report.pdf",
             // The page syntax, and which mistakes end with which exit code.
             "A-B  pages A to B, both included; A must not be above B",
             "A-   page A and every page after it",
@@ -738,19 +815,29 @@ fn help_teaches_the_whole_contract() {
             // How split names its files, and that it writes all or nothing.
             "<name of the input without its extension>-<NNN>.pdf",
             "--force was not given, nothing is written at all",
+            // What rotate and delete write, and what they refuse.
+            "right by --degrees: 90, 180 or 270",
+            "Any other --degrees, 0 included, is a usage error: exit code 2",
+            "delete writes the pages of the input that --pages does not select",
+            "code no_pages_left, and nothing is written",
             // The exit codes, and what happens to a report nobody can read.
             "Exit codes:",
             "If the report cannot be written",
             // The codes this command line can never produce say so.
             "no_inputs          there was nothing to merge; never reported by this",
             "page_repeated      a page was asked for more than once; never reported by",
-            "no_pages_left      the new document would have no pages; never reported",
+            "no_pages_left      the new document would have no pages: delete was given",
+            // Which command can report which code.
+            "page_out_of_range comes from extract, render, rotate and",
+            "no_pages_left from delete only",
             // Every JSON shape.
             r#"{"ok":true,"operation":"merge","output":"merged.pdf","inputs":2,"pages":12}"#,
             r#"{"ok":true,"operation":"info","input":"report.pdf","pages":12}"#,
             r#"{"ok":true,"operation":"extract","output":"part.pdf","pages":7}"#,
             r#"{"ok":true,"operation":"split","outputs":["parts/report-001.pdf","parts/report-002.pdf"],"files":2,"pages":12}"#,
             r#"{"ok":true,"operation":"render","output":"page.png","page":1,"width":1024,"height":1449}"#,
+            r#"{"ok":true,"operation":"rotate","output":"up.pdf","pages":12}"#,
+            r#"{"ok":true,"operation":"delete","output":"shorter.pdf","pages":9}"#,
             r#"{"ok":false,"operation":"merge","error":{"code":"output_exists","#,
             // The extra key of a split that stopped midway.
             r#"adds "written" to"#,
@@ -774,10 +861,88 @@ fn help_teaches_the_whole_contract() {
 }
 
 #[test]
+fn the_usage_lines_of_rotate_and_delete_are_as_documented() {
+    // The short help (`-h`) starts with the line that AGENTS.md and the
+    // README copy. It shows what is required and in which form.
+    let lines = [
+        (
+            "rotate",
+            "Usage: danonpdf-cli rotate [OPTIONS] --degrees <DEGREES> --output <FILE> <INPUT>\n",
+        ),
+        (
+            "delete",
+            "Usage: danonpdf-cli delete [OPTIONS] --pages <PAGES> --output <FILE> <INPUT>\n",
+        ),
+    ];
+    for (command, usage) in lines {
+        let result = cli(&[OsStr::new(command), OsStr::new("-h")]);
+
+        assert_eq!(result.status.code(), Some(0), "{command}");
+        assert_eq!(stderr(&result), "", "{command}");
+        let help = stdout(&result);
+        assert!(help.contains(usage), "{command} gave: {help}");
+        // Every option the usage line folds into "[OPTIONS]".
+        for option in ["--pages <PAGES>", "--force", "--json"] {
+            assert!(help.contains(option), "{command} lacks {option}: {help}");
+        }
+    }
+    // Only the `--pages` of a rotation may be left out, and the help says
+    // what it then stands for.
+    let rotate_help = stdout(&cli(&[OsStr::new("rotate"), OsStr::new("-h")]));
+    assert!(
+        rotate_help.contains("[default: 1-]"),
+        "unexpected: {rotate_help}"
+    );
+}
+
+#[test]
+fn the_help_of_rotate_and_delete_lists_the_error_codes_they_can_report() {
+    let codes = [
+        (
+            "rotate",
+            &[
+                "output_is_input",
+                "output_exists",
+                "read_failed",
+                "encrypted",
+                "broken_pdf",
+                "page_out_of_range",
+                "save_failed",
+            ][..],
+        ),
+        (
+            "delete",
+            &[
+                "output_is_input",
+                "output_exists",
+                "read_failed",
+                "encrypted",
+                "broken_pdf",
+                "page_out_of_range",
+                "no_pages_left",
+                "save_failed",
+            ][..],
+        ),
+    ];
+    for (command, codes) in codes {
+        let help = stdout(&cli(&[OsStr::new(command), OsStr::new("--help")]));
+
+        // Each code at the start of its own line of the list, not merely
+        // somewhere in the text.
+        for code in codes {
+            let line = format!("\n  {code} ");
+            assert!(help.contains(&line), "{command} lacks {code}");
+        }
+    }
+}
+
+#[test]
 fn the_examples_in_the_help_tell_the_truth() {
-    // The help shows what `extract --pages 1-3,7,10-` and `split --every
-    // 10` print for a 12-page report. Run both on one and compare the
-    // numbers, so the examples cannot drift from what the tool does.
+    // The help shows what `extract --pages 1-3,7,10-`, `split --every 10`,
+    // `rotate --degrees 90 --pages 5-`, `delete --pages 2,5-6` and the
+    // reordering `extract --pages 3,1,2,4-` print for a 12-page report. Run
+    // them on one and compare the numbers, so the examples cannot drift
+    // from what the tool does.
     let scratch = ScratchDir::new("help-examples");
     let report = scratch.pdf("report.pdf", 12);
 
@@ -786,6 +951,23 @@ fn the_examples_in_the_help_tell_the_truth() {
         &["--json", "--every", "10"],
         &scratch.file("parts"),
         &report,
+    );
+    let turned = rotate(
+        &["--json", "--pages", "5-"],
+        "90",
+        &scratch.file("up.pdf"),
+        &report,
+    );
+    let shorter = delete(&["--json"], "2,5-6", &scratch.file("shorter.pdf"), &report);
+    let moved = extract(&["--json"], "3,1,2,4-", &scratch.file("moved.pdf"), &report);
+
+    assert_eq!(json_report(&turned)["pages"], 12);
+    assert_eq!(json_report(&shorter)["pages"], 9);
+    // Every page is still there, with page 3 moved to the front.
+    assert_eq!(json_report(&moved)["pages"], 12);
+    assert_eq!(
+        page_widths(&scratch.file("moved.pdf")),
+        [503, 501, 502, 504, 505, 506, 507, 508, 509, 510, 511, 512]
     );
 
     assert_eq!(json_report(&info(&["--json"], &report))["pages"], 12);
@@ -1843,4 +2025,569 @@ fn the_commands_that_do_not_draw_do_not_need_the_library() {
 
     assert_eq!(json_report(&counted)["pages"], 3);
     assert_eq!(json_report(&extracted)["pages"], 2);
+}
+
+// rotate
+
+#[test]
+fn rotate_turns_every_page_when_no_pages_are_named() {
+    let scratch = ScratchDir::new("rotate-all");
+    let input = scratch.file("in.pdf");
+    // Page 2 already lies on its side; the other two are upright.
+    rotated(with_pages(3), 2, 90).save(&input).unwrap();
+    let before = fs::read(&input).unwrap();
+    let out = scratch.file("out.pdf");
+
+    let result = rotate(&["--json"], "90", &out, &input);
+
+    assert_eq!(result.status.code(), Some(0), "{}", stdout(&result));
+    // The report of an extract, field for field, under another name.
+    assert_eq!(
+        json_report(&result),
+        json!({
+            "ok": true,
+            "operation": "rotate",
+            "output": text(&out),
+            "pages": 3,
+        })
+    );
+    assert!(
+        stdout(&result).starts_with(r#"{"ok":true,"operation":"rotate","output":""#),
+        "unexpected: {}",
+        stdout(&result)
+    );
+    // Every page is there, in its place, a quarter turn further than it
+    // was: the turn is added to the rotation a page has.
+    assert_eq!(page_widths(&out), [501, 502, 503]);
+    assert_eq!(page_rotations(&out), [Some(90), Some(180), Some(90)]);
+    // What `info` says about the result agrees with the report.
+    assert_eq!(json_report(&info(&["--json"], &out))["pages"], 3);
+    // The input is only read.
+    assert_eq!(fs::read(&input).unwrap(), before, "the input was changed");
+    assert_eq!(scratch.entries(), ["in.pdf", "out.pdf"]);
+}
+
+#[test]
+fn rotate_turns_only_the_chosen_pages_and_moves_none() {
+    let scratch = ScratchDir::new("rotate-some");
+    let input = scratch.pdf("in.pdf", 4);
+    let out = scratch.file("out.pdf");
+
+    // Page 3 is named before page 1: for a rotation that changes nothing.
+    let result = rotate(&["--pages", "3,1"], "270", &out, &input);
+
+    assert_eq!(result.status.code(), Some(0), "{}", stderr(&result));
+    assert_eq!(
+        stdout(&result),
+        format!("Rotated the chosen pages; {} has 4 pages\n", out.display())
+    );
+    assert_eq!(stderr(&result), "");
+    assert_eq!(page_widths(&out), [501, 502, 503, 504]);
+    assert_eq!(page_rotations(&out), [Some(270), None, Some(270), None]);
+}
+
+#[test]
+fn each_degrees_turns_by_that_much_and_a_full_turn_ends_upright() {
+    let scratch = ScratchDir::new("rotate-degrees");
+    let input = scratch.file("in.pdf");
+    // Page 1 is upright and page 2 lies at 270.
+    rotated(with_pages(2), 2, 270).save(&input).unwrap();
+
+    let cases = [
+        // 270 and 90 more are a full turn: written as 0, not left at 360
+        // and not left without the key.
+        ("90", [Some(90), Some(0)]),
+        ("180", [Some(180), Some(90)]),
+        ("270", [Some(270), Some(180)]),
+    ];
+    for (degrees, rotations) in cases {
+        let out = scratch.file(&format!("out-{degrees}.pdf"));
+
+        let result = rotate(&["--json"], degrees, &out, &input);
+
+        assert_eq!(result.status.code(), Some(0), "--degrees {degrees}");
+        assert_eq!(json_report(&result)["pages"], 2, "--degrees {degrees}");
+        assert_eq!(page_rotations(&out), rotations, "--degrees {degrees}");
+    }
+}
+
+#[test]
+fn degrees_must_be_90_180_or_270_also_with_json() {
+    let scratch = ScratchDir::new("rotate-bad-degrees");
+    let input = scratch.pdf("in.pdf", 2);
+    let out = scratch.file("out.pdf");
+
+    for degrees in ["0", "45", "360", "abc", ""] {
+        for flags in [&[][..], &["--json"][..]] {
+            let result = rotate(flags, degrees, &out, &input);
+
+            assert_eq!(result.status.code(), Some(2), "{degrees:?} {flags:?}");
+            assert_eq!(stdout(&result), "", "{degrees:?} {flags:?}");
+            let message = stderr(&result);
+            assert!(
+                message.starts_with("error: ")
+                    && message.contains("--degrees <DEGREES>")
+                    && message.contains("the turn must be 90, 180 or 270"),
+                "{degrees:?} {flags:?} gave: {message}"
+            );
+        }
+    }
+    // Leaving `--degrees` out is no way to ask for "no turn" either.
+    for flags in [&[][..], &["--json"][..]] {
+        let mut args: Vec<&OsStr> = vec![OsStr::new("rotate")];
+        args.extend(flags.iter().map(OsStr::new));
+        args.extend([OsStr::new("--output"), out.as_os_str(), input.as_os_str()]);
+
+        let result = cli(&args);
+
+        assert_eq!(result.status.code(), Some(2), "{flags:?}");
+        assert_eq!(stdout(&result), "", "{flags:?}");
+        assert!(
+            stderr(&result).contains("--degrees <DEGREES>"),
+            "{flags:?} gave: {}",
+            stderr(&result)
+        );
+    }
+    assert_eq!(scratch.entries(), ["in.pdf"]);
+}
+
+#[test]
+fn rotate_never_writes_over_its_input() {
+    let scratch = ScratchDir::new("rotate-output-is-input");
+    let input = scratch.pdf("in.pdf", 3);
+    let before = fs::read(&input).unwrap();
+    // The input itself, spelled differently.
+    let respelled = scratch.0.join(".").join("in.pdf");
+
+    for flags in [&["--json"][..], &["--json", "--force"][..]] {
+        let result = rotate(flags, "90", &respelled, &input);
+
+        let error = failure_of(&result, "rotate", "output_is_input");
+        assert_eq!(error["path"], text(&respelled));
+        assert_eq!(fs::read(&input).unwrap(), before, "the input was changed");
+        assert_eq!(scratch.entries(), ["in.pdf"]);
+    }
+}
+
+#[test]
+fn rotate_replaces_an_existing_output_only_with_force() {
+    let scratch = ScratchDir::new("rotate-output-exists");
+    let input = scratch.pdf("in.pdf", 3);
+    let out = scratch.file("out.pdf");
+    fs::write(&out, b"someone else's file").unwrap();
+
+    let refused = rotate(&["--json"], "180", &out, &input);
+
+    let error = failure_of(&refused, "rotate", "output_exists");
+    assert_eq!(error["path"], text(&out));
+    assert_eq!(fs::read(&out).unwrap(), b"someone else's file");
+    assert_eq!(scratch.entries(), ["in.pdf", "out.pdf"]);
+
+    let forced = rotate(&["--json", "--force"], "180", &out, &input);
+
+    assert_eq!(forced.status.code(), Some(0));
+    assert_eq!(json_report(&forced)["pages"], 3);
+    assert_eq!(page_rotations(&out), [Some(180), Some(180), Some(180)]);
+}
+
+#[test]
+fn rotating_a_page_past_the_end_is_page_out_of_range_and_writes_nothing() {
+    let scratch = ScratchDir::new("rotate-past-end");
+    let input = scratch.pdf("in.pdf", 5);
+    let before = fs::read(&input).unwrap();
+    let out = scratch.file("out.pdf");
+    fs::write(&out, b"someone else's file").unwrap();
+
+    // `--force`, so that only the pages stand in the way: the output that
+    // is there must come through a refusal of the core untouched too.
+    let result = rotate(&["--json", "--force", "--pages", "2,9"], "90", &out, &input);
+
+    let error = failure_of(&result, "rotate", "page_out_of_range");
+    // The failure is about the pages asked for, not about a file.
+    assert_eq!(error.get("path"), None);
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.contains("page 9") && message.contains("5 pages"),
+        "unexpected message: {message}"
+    );
+    assert_eq!(fs::read(&out).unwrap(), b"someone else's file");
+    assert_eq!(fs::read(&input).unwrap(), before, "the input was changed");
+    assert_eq!(scratch.entries(), ["in.pdf", "out.pdf"]);
+}
+
+// delete
+
+#[test]
+fn delete_writes_the_pages_that_were_not_chosen_in_their_order() {
+    let scratch = ScratchDir::new("delete-success");
+    let input = scratch.file("in.pdf");
+    // Page 3 lies on its side: a page that stays keeps its rotation.
+    rotated(with_pages(5), 3, 90).save(&input).unwrap();
+    let before = fs::read(&input).unwrap();
+    let out = scratch.file("out.pdf");
+
+    // Page 4 is named before page 2: for a deletion that changes nothing.
+    let result = delete(&["--json"], "4,2", &out, &input);
+
+    assert_eq!(result.status.code(), Some(0), "{}", stdout(&result));
+    // The report of an extract, field for field, under another name.
+    // "pages" counts the pages of the new file: the ones that are left.
+    assert_eq!(
+        json_report(&result),
+        json!({
+            "ok": true,
+            "operation": "delete",
+            "output": text(&out),
+            "pages": 3,
+        })
+    );
+    assert!(
+        stdout(&result).starts_with(r#"{"ok":true,"operation":"delete","output":""#),
+        "unexpected: {}",
+        stdout(&result)
+    );
+    // Pages 1, 3 and 5 of the input, as they were.
+    assert_eq!(page_widths(&out), [501, 503, 505]);
+    assert_eq!(page_rotations(&out), [None, Some(90), None]);
+    assert_eq!(json_report(&info(&["--json"], &out))["pages"], 3);
+    // The input is only read.
+    assert_eq!(fs::read(&input).unwrap(), before, "the input was changed");
+    assert_eq!(scratch.entries(), ["in.pdf", "out.pdf"]);
+}
+
+#[test]
+fn delete_understands_ranges_and_prints_one_human_line() {
+    let scratch = ScratchDir::new("delete-human");
+    let input = scratch.pdf("in.pdf", 6);
+    let out = scratch.file("out.pdf");
+
+    let result = delete(&[], " 5- , 1-2 ", &out, &input);
+
+    assert_eq!(result.status.code(), Some(0), "{}", stderr(&result));
+    assert_eq!(
+        stdout(&result),
+        format!("Deleted the chosen pages; {} has 2 pages\n", out.display())
+    );
+    assert_eq!(stderr(&result), "");
+    assert_eq!(page_widths(&out), [503, 504]);
+}
+
+#[test]
+fn deleting_every_page_is_no_pages_left_and_writes_nothing() {
+    let scratch = ScratchDir::new("delete-all");
+    let input = scratch.pdf("in.pdf", 3);
+    let before = fs::read(&input).unwrap();
+    let out = scratch.file("out.pdf");
+
+    // Every page, said in three ways.
+    for pages in ["1-", "1-3", "2,3,1"] {
+        let result = delete(&["--json"], pages, &out, &input);
+
+        let error = failure_of(&result, "delete", "no_pages_left");
+        // About the pages asked for, not about a file.
+        assert_eq!(error.get("path"), None, "{pages:?}");
+        assert_eq!(error.get("written"), None, "{pages:?}");
+        assert_eq!(fs::read(&input).unwrap(), before, "the input was changed");
+        assert_eq!(scratch.entries(), ["in.pdf"], "{pages:?}");
+    }
+
+    // With `--force` and an output that is there, the refusal still comes
+    // before anything is written: the old file is not replaced.
+    fs::write(&out, b"someone else's file").unwrap();
+
+    let result = delete(&["--json", "--force"], "1-", &out, &input);
+
+    failure_of(&result, "delete", "no_pages_left");
+    assert_eq!(fs::read(&out).unwrap(), b"someone else's file");
+    assert_eq!(scratch.entries(), ["in.pdf", "out.pdf"]);
+}
+
+#[test]
+fn delete_never_writes_over_its_input() {
+    let scratch = ScratchDir::new("delete-output-is-input");
+    let input = scratch.pdf("in.pdf", 3);
+    let before = fs::read(&input).unwrap();
+    // The input itself, spelled differently.
+    let respelled = scratch.0.join(".").join("in.pdf");
+
+    for flags in [&["--json"][..], &["--json", "--force"][..]] {
+        let result = delete(flags, "1", &respelled, &input);
+
+        let error = failure_of(&result, "delete", "output_is_input");
+        assert_eq!(error["path"], text(&respelled));
+        assert_eq!(fs::read(&input).unwrap(), before, "the input was changed");
+        assert_eq!(scratch.entries(), ["in.pdf"]);
+    }
+}
+
+#[test]
+fn delete_replaces_an_existing_output_only_with_force() {
+    let scratch = ScratchDir::new("delete-output-exists");
+    let input = scratch.pdf("in.pdf", 3);
+    let out = scratch.file("out.pdf");
+    fs::write(&out, b"someone else's file").unwrap();
+
+    let refused = delete(&["--json"], "2", &out, &input);
+
+    let error = failure_of(&refused, "delete", "output_exists");
+    assert_eq!(error["path"], text(&out));
+    assert_eq!(fs::read(&out).unwrap(), b"someone else's file");
+    assert_eq!(scratch.entries(), ["in.pdf", "out.pdf"]);
+
+    let forced = delete(&["--json", "--force"], "2", &out, &input);
+
+    assert_eq!(forced.status.code(), Some(0));
+    assert_eq!(json_report(&forced)["pages"], 2);
+    assert_eq!(page_widths(&out), [501, 503]);
+}
+
+#[test]
+fn deleting_a_page_past_the_end_is_page_out_of_range_and_writes_nothing() {
+    let scratch = ScratchDir::new("delete-past-end");
+    let input = scratch.pdf("in.pdf", 5);
+    let before = fs::read(&input).unwrap();
+    let out = scratch.file("out.pdf");
+    fs::write(&out, b"someone else's file").unwrap();
+
+    let result = delete(&["--json", "--force"], "2,9", &out, &input);
+
+    let error = failure_of(&result, "delete", "page_out_of_range");
+    assert_eq!(error.get("path"), None);
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.contains("page 9") && message.contains("5 pages"),
+        "unexpected message: {message}"
+    );
+    assert_eq!(fs::read(&out).unwrap(), b"someone else's file");
+    assert_eq!(fs::read(&input).unwrap(), before, "the input was changed");
+    assert_eq!(scratch.entries(), ["in.pdf", "out.pdf"]);
+}
+
+// rotate and delete: what they share
+
+/// Runs `rotate` or `delete`, whichever `command` names, with a line that
+/// is valid for it: `--degrees 90` for the one, `--pages 1` for the other.
+fn rotate_or_delete(command: &str, flags: &[&str], output: &Path, input: &Path) -> Output {
+    match command {
+        "rotate" => rotate(flags, "90", output, input),
+        "delete" => delete(flags, "1", output, input),
+        other => panic!("{other} is neither rotate nor delete"),
+    }
+}
+
+#[test]
+fn a_relative_spelling_of_the_input_is_still_the_input() {
+    for command in ["rotate", "delete"] {
+        let scratch = ScratchDir::new(&format!("{command}-relative-output"));
+        let input = scratch.pdf("in.pdf", 3);
+        let before = fs::read(&input).unwrap();
+        // The input by its whole path, the output by its bare name, and
+        // the program started inside the folder: two spellings, one file.
+        let what = match command {
+            "rotate" => "--degrees=90",
+            _ => "--pages=1",
+        };
+        let args = words_then_paths(
+            &[command, what, "--json", "--force", "--output", "in.pdf"],
+            &[&input],
+        );
+
+        let result = cli_in(&scratch.0, &args);
+
+        let error = failure_of(&result, command, "output_is_input");
+        // As given: the report does not turn it into the whole path.
+        assert_eq!(error["path"], "in.pdf");
+        assert_eq!(fs::read(&input).unwrap(), before, "the input was changed");
+        assert_eq!(scratch.entries(), ["in.pdf"]);
+    }
+}
+
+// Links only exist in this form on Unix-like systems.
+#[cfg(unix)]
+#[test]
+fn a_link_to_the_input_is_still_the_input() {
+    for command in ["rotate", "delete"] {
+        let scratch = ScratchDir::new(&format!("{command}-link-output"));
+        let input = scratch.pdf("in.pdf", 3);
+        let before = fs::read(&input).unwrap();
+        let link = scratch.file("link.pdf");
+        std::os::unix::fs::symlink(&input, &link).unwrap();
+
+        let result = rotate_or_delete(command, &["--json", "--force"], &link, &input);
+
+        let error = failure_of(&result, command, "output_is_input");
+        assert_eq!(error["path"], text(&link));
+        assert_eq!(fs::read(&input).unwrap(), before, "the input was changed");
+        assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(scratch.entries(), ["in.pdf", "link.pdf"]);
+    }
+}
+
+#[test]
+fn rotate_and_delete_report_what_they_cannot_read_with_its_path() {
+    for command in ["rotate", "delete"] {
+        let scratch = ScratchDir::new(&format!("{command}-read-failures"));
+        let missing = scratch.file("missing.pdf");
+        let locked = scratch.file("locked.pdf");
+        encrypted(with_pages(2), "secret").save(&locked).unwrap();
+        let out = scratch.file("out.pdf");
+
+        let result = rotate_or_delete(command, &["--json"], &out, &missing);
+        let error = failure_of(&result, command, "read_failed");
+        assert_eq!(error["path"], text(&missing));
+
+        let result = rotate_or_delete(command, &["--json"], &out, &locked);
+        let error = failure_of(&result, command, "encrypted");
+        assert_eq!(error["path"], text(&locked));
+        // One file is read, so there is no "input 1" to speak of.
+        assert_eq!(error["message"], THE_FILE_IS_ENCRYPTED);
+
+        assert_eq!(scratch.entries(), ["locked.pdf"], "{command}");
+    }
+}
+
+#[test]
+fn rotate_and_delete_report_an_output_they_cannot_save_with_its_path() {
+    for command in ["rotate", "delete"] {
+        let scratch = ScratchDir::new(&format!("{command}-missing-folder"));
+        let input = scratch.pdf("in.pdf", 2);
+        // Unlike `split`, they do not create the folder of their output.
+        let out = scratch.file("missing").join("out.pdf");
+
+        let result = rotate_or_delete(command, &["--json"], &out, &input);
+
+        let error = failure_of(&result, command, "save_failed");
+        assert_eq!(error["path"], text(&out));
+        assert_eq!(scratch.entries(), ["in.pdf"], "{command}");
+    }
+}
+
+#[test]
+fn without_json_rotate_and_delete_fail_on_stderr_only() {
+    for command in ["rotate", "delete"] {
+        let scratch = ScratchDir::new(&format!("{command}-human-failure"));
+        let input = scratch.pdf("in.pdf", 2);
+        let out = scratch.file("out.pdf");
+        fs::write(&out, b"taken").unwrap();
+
+        let result = rotate_or_delete(command, &[], &out, &input);
+
+        assert_eq!(result.status.code(), Some(1), "{command}");
+        assert_eq!(stdout(&result), "", "{command}");
+        assert_eq!(
+            stderr(&result),
+            format!(
+                "error: the output {} already exists; pass --force to replace it\n",
+                out.display()
+            ),
+            "{command}"
+        );
+        assert_eq!(fs::read(&out).unwrap(), b"taken", "{command}");
+    }
+}
+
+#[test]
+fn without_json_deleting_every_page_says_so_on_stderr() {
+    let scratch = ScratchDir::new("delete-all-human");
+    let input = scratch.pdf("in.pdf", 2);
+    let out = scratch.file("out.pdf");
+
+    let result = delete(&[], "1-", &out, &input);
+
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(stdout(&result), "");
+    // The sentence is the core's; only its start is pinned here.
+    let message = stderr(&result);
+    assert!(
+        message.starts_with("error: no pages would be left"),
+        "unexpected: {message}"
+    );
+    assert_eq!(message.matches('\n').count(), 1, "one line: {message}");
+    assert_eq!(scratch.entries(), ["in.pdf"]);
+}
+
+/// A command line made of plain words followed by paths.
+fn words_then_paths<'a>(words: &[&'a str], paths: &[&'a Path]) -> Vec<&'a OsStr> {
+    // `*word` is the `&str` itself, not the reference to it that `iter`
+    // lends: the `OsStr` then lives as long as the text, not as the list.
+    words
+        .iter()
+        .map(|word| OsStr::new(*word))
+        .chain(paths.iter().map(|path| path.as_os_str()))
+        .collect()
+}
+
+#[test]
+fn rotate_and_delete_refuse_an_incomplete_or_misspelled_command_line() {
+    let scratch = ScratchDir::new("rotate-delete-usage");
+    let input = scratch.pdf("in.pdf", 3);
+    let out = scratch.file("out.pdf");
+    let (input, out) = (input.as_path(), out.as_path());
+
+    // What is missing or wrong, line by line. `--json` is on some of them:
+    // a usage error is plain text on stderr all the same.
+    let lines = [
+        // `delete` without `--pages`: it does not mean "every page".
+        words_then_paths(&["delete", "--json", "--output"], &[out, input]),
+        // No `--output`.
+        words_then_paths(&["delete", "--pages", "1"], &[input]),
+        words_then_paths(&["rotate", "--degrees", "90"], &[input]),
+        // Two inputs.
+        words_then_paths(
+            &["rotate", "--json", "--degrees", "90", "--output"],
+            &[out, input, input],
+        ),
+        // Pages that cannot be read, for each of the two.
+        words_then_paths(
+            &["rotate", "--degrees", "90", "--pages", "5-3", "--output"],
+            &[out, input],
+        ),
+        words_then_paths(
+            &["delete", "--json", "--pages", "1-3,2", "--output"],
+            &[out, input],
+        ),
+        // `delete` takes no `--degrees`.
+        words_then_paths(
+            &["delete", "--degrees", "90", "--pages", "1", "--output"],
+            &[out, input],
+        ),
+    ];
+    for line in lines {
+        let result = cli(&line);
+
+        assert_eq!(result.status.code(), Some(2), "{line:?}");
+        assert_eq!(stdout(&result), "", "{line:?}");
+        assert!(
+            stderr(&result).starts_with("error: "),
+            "{line:?} gave: {}",
+            stderr(&result)
+        );
+    }
+    assert_eq!(scratch.entries(), ["in.pdf"]);
+}
+
+#[test]
+fn a_repeated_page_is_a_usage_error_and_never_page_repeated() {
+    // The error code `page_repeated` exists in the contract, but no
+    // command can reach it: a list that names a page twice is refused by
+    // the argument parser, before any file is opened.
+    let scratch = ScratchDir::new("page-repeated");
+    let input = scratch.pdf("in.pdf", 5);
+    let out = scratch.file("out.pdf");
+
+    let results = [
+        extract(&["--json"], "2,2", &out, &input),
+        rotate(&["--json", "--pages", "1-3,2"], "90", &out, &input),
+        delete(&["--json"], "4,4", &out, &input),
+    ];
+    for result in results {
+        assert_eq!(result.status.code(), Some(2));
+        assert_eq!(stdout(&result), "");
+        assert!(
+            stderr(&result).contains("listed more than once"),
+            "unexpected: {}",
+            stderr(&result)
+        );
+    }
+    assert_eq!(scratch.entries(), ["in.pdf"]);
 }

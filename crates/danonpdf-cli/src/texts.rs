@@ -83,6 +83,25 @@ pub fn rendered(page: usize, width: u32, height: u32, output: &Path) -> String {
     )
 }
 
+/// The line printed when pages were rotated, without `--json`. `pages` is
+/// how many pages the new file has.
+///
+/// The count stands next to the file it belongs to, as in the line of
+/// `info`. "Rotated 5 pages" would read as "5 pages were turned", and the
+/// tool does not know that number: only the core sees which pages the
+/// selection picks.
+pub fn rotated(pages: usize, output: &Path) -> String {
+    let pages = counted(pages, "page", "pages");
+    format!("Rotated the chosen pages; {} has {pages}", output.display())
+}
+
+/// The line printed when pages were deleted, without `--json`. `pages` is
+/// how many pages the new file has: the ones that are left.
+pub fn deleted(pages: usize, output: &Path) -> String {
+    let pages = counted(pages, "page", "pages");
+    format!("Deleted the chosen pages; {} has {pages}", output.display())
+}
+
 /// Why an operation was refused: `output` is one of the files it reads.
 pub fn output_is_input(output: &Path) -> String {
     format!(
@@ -147,6 +166,13 @@ pub fn output_is_not_png(output: &Path) -> String {
         "render writes a PNG image, so its output must end in .png; {} does not",
         output.display()
     )
+}
+
+/// Why the command line was refused: `--degrees` did not get one of the
+/// three turns. clap prints it after "error: invalid value '...' for
+/// '--degrees <DEGREES>': ".
+pub fn not_a_turn() -> String {
+    "the turn must be 90, 180 or 270 (degrees to the right)".to_owned()
 }
 
 #[cfg(test)]
@@ -223,6 +249,24 @@ mod tests {
     }
 
     #[test]
+    fn rotated_and_deleted_count_the_pages_of_the_new_file() {
+        // The count is that of the file written, not of the pages turned
+        // or deleted, and the sentence puts it next to the file's name.
+        assert_eq!(
+            rotated(5, Path::new("out.pdf")),
+            "Rotated the chosen pages; out.pdf has 5 pages"
+        );
+        assert_eq!(
+            deleted(3, Path::new("out.pdf")),
+            "Deleted the chosen pages; out.pdf has 3 pages"
+        );
+        assert_eq!(
+            deleted(1, Path::new("out.pdf")),
+            "Deleted the chosen pages; out.pdf has 1 page"
+        );
+    }
+
+    #[test]
     fn not_a_page_number_says_where_pages_start() {
         assert_eq!(
             not_a_page_number(),
@@ -243,6 +287,14 @@ mod tests {
         assert_eq!(
             output_is_not_png(Path::new("page.jpg")),
             "render writes a PNG image, so its output must end in .png; page.jpg does not"
+        );
+    }
+
+    #[test]
+    fn not_a_turn_says_what_degrees_takes() {
+        assert_eq!(
+            not_a_turn(),
+            "the turn must be 90, 180 or 270 (degrees to the right)"
         );
     }
 

@@ -2,10 +2,11 @@
 //! when it worked, a [`Failure`] when it did not.
 //!
 //! Each operation has its own module (`merge.rs`, `info.rs`, `extract.rs`,
-//! `split.rs`, `render.rs`) with a `run` function that returns
-//! `Result<Report, Failure>`. Nothing in those modules prints or ends the
-//! program: `output.rs` decides how to show either value. That split keeps
-//! the rules testable without starting a program and reading its output.
+//! `split.rs`, `render.rs`, `rotate.rs`, `delete.rs`) with a `run` function
+//! that returns `Result<Report, Failure>`. Nothing in those modules prints
+//! or ends the program: `output.rs` decides how to show either value. That
+//! split keeps the rules testable without starting a program and reading
+//! its output.
 //!
 //! What the operations share lives here: the names they go by, the shape
 //! of a failure, the two places where an error of the core gets its code
@@ -26,6 +27,8 @@ pub enum Operation {
     Extract,
     Split,
     Render,
+    Rotate,
+    Delete,
 }
 
 impl Operation {
@@ -46,6 +49,8 @@ impl Operation {
             Self::Extract => "extract",
             Self::Split => "split",
             Self::Render => "render",
+            Self::Rotate => "rotate",
+            Self::Delete => "delete",
         }
     }
 }
@@ -97,6 +102,19 @@ pub enum Report {
         /// comes out narrower than the width that was asked for.
         width: u32,
         height: u32,
+    },
+    Rotate {
+        /// Where the new file was written.
+        output: PathBuf,
+        /// How many pages it has: every page of the input, the ones that
+        /// were turned and the ones that were not.
+        pages: usize,
+    },
+    Delete {
+        /// Where the new file was written.
+        output: PathBuf,
+        /// How many pages it has: the ones that were not deleted.
+        pages: usize,
     },
 }
 
@@ -671,7 +689,7 @@ mod tests {
 
     #[test]
     fn an_error_about_the_only_input_names_that_file_and_no_number() {
-        // `info`, `extract` and `split` read one file. The code and the
+        // Every operation but `merge` reads one file. The code and the
         // path are what they are for a merge; only the words differ.
         let report = [Path::new("report.pdf")];
 
@@ -736,6 +754,8 @@ mod tests {
             (Operation::Extract, "extract"),
             (Operation::Split, "split"),
             (Operation::Render, "render"),
+            (Operation::Rotate, "rotate"),
+            (Operation::Delete, "delete"),
         ];
         for (operation, name) in names {
             assert_eq!(operation.name(), name);

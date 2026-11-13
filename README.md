@@ -66,6 +66,8 @@ danonpdf-cli info report.pdf
 danonpdf-cli extract --pages 1-3,7,10- --output part.pdf report.pdf
 danonpdf-cli split --every 10 --output-dir parts report.pdf
 danonpdf-cli render --page 1 --output page.png report.pdf
+danonpdf-cli rotate --degrees 90 --pages 5- --output up.pdf report.pdf
+danonpdf-cli delete --pages 2,5-6 --output shorter.pdf report.pdf
 ```
 
 | Command | What it does | What it prints |
@@ -75,6 +77,14 @@ danonpdf-cli render --page 1 --output page.png report.pdf
 | `extract` | Copies the chosen pages, in the order given, into one new file. | `Extracted 7 pages into part.pdf` |
 | `split` | Writes the pages into files of `--every` pages each (one page each without it). | `Split 12 pages into 2 files: parts/report-001.pdf to parts/report-002.pdf` |
 | `render` | Draws one page and writes it as a PNG image. See [Drawing a page](#drawing-a-page). | `Rendered page 1 (1024 by 1449 pixels) into page.png` |
+| `rotate` | Writes every page into one new file, with the chosen pages (all of them without `--pages`) turned 90, 180 or 270 degrees to the right. | `Rotated the chosen pages; up.pdf has 12 pages` |
+| `delete` | Writes the pages that were not chosen, in the same order, into one new file. | `Deleted the chosen pages; shorter.pdf has 9 pages` |
+
+To reorder pages, use `extract` and name every page in the new order. This moves page 3 of a file to the front and keeps the rest:
+
+```sh
+danonpdf-cli extract --pages 3,1,2,4- --output moved.pdf report.pdf
+```
 
 When a command fails, it prints `error: …` on stderr instead. With `--json`, every command prints exactly one JSON object on stdout, for a success and for a failure alike, and nothing on stderr:
 
@@ -84,6 +94,8 @@ When a command fails, it prints `error: …` on stderr instead. With `--json`, e
 {"ok":true,"operation":"extract","output":"part.pdf","pages":7}
 {"ok":true,"operation":"split","outputs":["parts/report-001.pdf","parts/report-002.pdf"],"files":2,"pages":12}
 {"ok":true,"operation":"render","output":"page.png","page":1,"width":1024,"height":1449}
+{"ok":true,"operation":"rotate","output":"up.pdf","pages":12}
+{"ok":true,"operation":"delete","output":"shorter.pdf","pages":9}
 {"ok":false,"operation":"merge","error":{"code":"output_exists","message":"…","path":"merged.pdf"}}
 ```
 
@@ -95,7 +107,7 @@ When a command fails, it prints `error: …` on stderr instead. With `--json`, e
 
 ### Choosing pages
 
-`--pages` takes a list of items separated by commas. Pages are counted from 1, and they are written in the order given.
+`--pages` takes a list of items separated by commas. Pages are counted from 1. `extract`, `rotate` and `delete` read it the same way.
 
 | Item | Meaning |
 | --- | --- |
@@ -103,7 +115,7 @@ When a command fails, it prints `error: …` on stderr instead. With `--json`, e
 | `1-3` | Pages 1 to 3. |
 | `10-` | Page 10 and every page after it. |
 
-So `1-3,7,10-` on a 12-page file takes pages 1, 2, 3, 7, 10, 11 and 12, and `3,1` puts page 3 before page 1. A list that cannot be read (`5-3`, `1,,3`, page 0, the same page twice) is a wrong command line: exit code `2`. A page past the end of the file is the failure `page_out_of_range`: exit code `1`. `info` tells how many pages there are.
+So `1-3,7,10-` on a 12-page file selects pages 1, 2, 3, 7, 10, 11 and 12. `extract` writes the pages in the order given: `3,1` puts page 3 before page 1. `rotate` and `delete` only look at which pages are named, and keep the order of the file. A list that cannot be read (`5-3`, `1,,3`, page 0, the same page twice) is a wrong command line: exit code `2`. A page past the end of the file is the failure `page_out_of_range`: exit code `1`. `info` tells how many pages there are.
 
 ### Drawing a page
 
@@ -126,6 +138,9 @@ So `1-3,7,10-` on a 12-page file takes pages 1, 2, 3, 7, 10, 11 and 12, and `3,1
 - It uses output paths exactly as given: it does not add `.pdf` or `.png`. `render` refuses an output that does not end in `.png` instead.
 - It never writes over an input, not even with `--force` (a hard link to one is not recognised).
 - It replaces an existing output only with `--force`.
+- `rotate` and `delete` write a new file and only read the one they are given: neither changes a file in place.
+- `rotate` adds its turn to the rotation a page already has: 90 degrees on a page that lies at 270 leaves it upright. Use 270 to turn to the left. Any other `--degrees`, 0 included, is a wrong command line.
+- `delete` refuses to delete every page: failure `no_pages_left`, exit code `1`, and nothing is written.
 - `split` names its files after the input, numbered from 1: `report.pdf` gives `report-001.pdf`, `report-002.pdf`… inside `--output-dir`, which it creates if it is missing. It checks every name before it writes anything: if one is taken and `--force` was not given, it writes nothing. If a file cannot be saved halfway through, it stops and keeps the files already written; with `--json`, the error lists them under `written`.
 
 `danonpdf-cli --help` shows all of this with the list of error codes. [AGENTS.md](AGENTS.md) is the same contract written for an agent.

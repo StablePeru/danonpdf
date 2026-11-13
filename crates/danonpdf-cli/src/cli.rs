@@ -22,6 +22,7 @@
 //! a text that does not fit the type is a usage error like any other. That
 //! is how `--pages` is checked: its field is a `PageSelection`, the core
 //! knows how to read one from text, and what the core refuses clap reports.
+//! `--degrees` is checked the same way, into the core's `Turn`.
 //!
 //! Two rules are checked here and not by clap: "at least two inputs" (see
 //! [`MergeArgs::check`]) and "the image is written to a `.png` file" (see
@@ -34,7 +35,7 @@ use std::path::{Path, PathBuf};
 
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use danonpdf_core::{MAX_RENDER_WIDTH, PageSelection};
+use danonpdf_core::{MAX_RENDER_WIDTH, PageSelection, Turn};
 
 use crate::outcome::Operation;
 use crate::texts;
@@ -51,6 +52,10 @@ const MIN_INPUTS: usize = 2;
 /// (`MAX_RENDER_WIDTH`), so a caller that needs more detail has room to
 /// ask for it.
 const DEFAULT_RENDER_WIDTH: u32 = 1024;
+
+/// The `--pages` of a rotation that was given none: page 1 and every page
+/// after it, written in the page syntax itself.
+const EVERY_PAGE: &str = "1-";
 
 // The part of the help that a caller needs to use the tool without reading
 // anything else: examples, the rules, the exit codes and the JSON shapes.
@@ -74,15 +79,24 @@ const CONTRACT: &str = r#"Examples:
   danonpdf-cli extract --json --pages 1-3,7,10- --output part.pdf report.pdf
   danonpdf-cli split --json --every 10 --output-dir parts report.pdf
   danonpdf-cli render --json --page 1 --output page.png report.pdf
+  danonpdf-cli rotate --json --degrees 90 --pages 5- --output up.pdf report.pdf
+  danonpdf-cli delete --json --pages 2,5-6 --output shorter.pdf report.pdf
+  To reorder pages there is no command of its own: extract does it.
+  danonpdf-cli extract --json --pages 3,1,2,4- --output moved.pdf report.pdf
 
-Pages (the --pages of extract):
+Pages (the --pages of extract, rotate and delete):
   A list of items separated by commas. Pages are counted from 1.
     N    page N
     A-B  pages A to B, both included; A must not be above B
     A-   page A and every page after it
-  Example: 1-3,7,10- takes pages 1, 2, 3 and 7, and from 10 to the last.
-  The pages are written in the order given: 3,1 puts page 3 first. Spaces
-  around an item are ignored. No page may be listed twice (1-5,3 is
+  Example: 1-3,7,10- selects pages 1, 2, 3 and 7, and from 10 to the last.
+  extract writes the pages in the order given: 3,1 puts page 3 first. So
+  extract is also how pages are reordered: name every page, in the new
+  order. 3,1,2,4- moves page 3 to the front and keeps the rest; a page
+  that is not named is left out of the new file.
+  rotate and delete only look at which pages are named, not at the order
+  they are named in: what they write stays in the order of the input.
+  Spaces around an item are ignored. No page may be listed twice (1-5,3 is
   refused).
   A list that cannot be read (empty, an empty item, not a number, page 0,
   a backwards range such as 5-3, a page listed twice) is a usage error:
@@ -117,13 +131,14 @@ The PDFium library (render only):
   DANONPDF_PDFIUM_DIR when it is set and not empty. Nowhere else: not in
   the current folder and not along PATH. If the file is not there or
   cannot be loaded: exit code 1, error code renderer_unavailable.
-  merge, info, extract and split do not need it.
+  merge, info, extract, split, rotate and delete do not need it.
 
 Rules:
   - Every input is read as given: none is skipped for its name, and merge
     reads the same file twice when it is given twice.
   - Output paths are used exactly as given: no extension is added.
-  - An output is never an input, not even with --force.
+  - An output is never an input, not even with --force. An input is only
+    read: rotate and delete write a new file and leave theirs as it was.
   - An existing output is replaced only with --force.
   - split writes <name of the input without its extension>-<NNN>.pdf into
     --output-dir, which it creates if it is missing: report-001.pdf,
@@ -131,6 +146,14 @@ Rules:
     --every N puts N pages in each file; the last one may have fewer.
     Every name is checked before anything is written: if one is taken and
     --force was not given, nothing is written at all.
+  - rotate writes every page of the input, in the same order. The pages
+    that --pages selects (every page when it is left out) are turned to the
+    right by --degrees: 90, 180 or 270. The turn is added to the rotation a
+    page already has: 90 on a page that lies at 270 leaves it upright.
+    Any other --degrees, 0 included, is a usage error: exit code 2.
+  - delete writes the pages of the input that --pages does not select, in
+    the same order. --pages is required. Deleting every page is refused:
+    exit code 1, error code no_pages_left, and nothing is written.
   - The tool never asks a question, never reads stdin and never uses the
     network.
 
@@ -154,15 +177,19 @@ Output with --json:
   {"ok":true,"operation":"extract","output":"part.pdf","pages":7}
   {"ok":true,"operation":"split","outputs":["parts/report-001.pdf","parts/report-002.pdf"],"files":2,"pages":12}
   {"ok":true,"operation":"render","output":"page.png","page":1,"width":1024,"height":1449}
+  {"ok":true,"operation":"rotate","output":"up.pdf","pages":12}
+  {"ok":true,"operation":"delete","output":"shorter.pdf","pages":9}
   failure, one shape for every command:
   {"ok":false,"operation":"merge","error":{"code":"output_exists","message":"...","path":"merged.pdf"}}
   "input", "output" and "outputs" are paths as given, "outputs" in page
   order. "inputs" is the number of files read and "files" the number of
   files written. "pages" is the number of pages of the input (info, split)
-  or of the output (merge, extract). "page" is the page that was drawn,
-  and "width" and "height" the size in pixels of the image that was
-  written (render). "message" is for people; "path" is the file the error
-  is about, and the key is left out when there is none.
+  or of the output (merge, extract, rotate, delete). For rotate that is
+  every page of the input, turned or not; for delete, the pages that are
+  left. "page" is the page that was drawn, and "width" and "height" the
+  size in pixels of the image that was written (render). "message" is for
+  people; "path" is the file the error is about, and the key is left out
+  when there is none.
   A split that stops after writing some of its files adds "written" to
   "error": the files already written, in order. They are complete and are
   kept, and "path" is the file that failed. No other failure has the key.
@@ -186,9 +213,8 @@ Error codes (stable: test for these, not for the message):
                      this command line, which refuses such a --pages list
                      first as a usage error (exit code 2, plain text on
                      stderr)
-  no_pages_left      the new document would have no pages; never reported
-                     by this command line, which has no command that
-                     deletes pages
+  no_pages_left      the new document would have no pages: delete was given
+                     a --pages that selects every page of the input
   save_failed        an output file, or the folder for it, could not be
                      written
   renderer_unavailable
@@ -200,13 +226,17 @@ Error codes (stable: test for these, not for the message):
                      with the input
   render_failed      the page was not drawn and no other code says why:
                      PDFium gave up on the file without a reason. Only
-                     render reports it"#;
+                     render reports it
+  Every command can report read_failed, encrypted and broken_pdf. Every
+  command but info can also report output_is_input, output_exists and
+  save_failed. page_out_of_range comes from extract, render, rotate and
+  delete, and no_pages_left from delete only."#;
 
 // Shown under the short help (`-h`), which leaves the contract out.
 const HELP_POINTER: &str =
     "Run with --help for examples, the page syntax, the exit codes and the JSON output.";
 
-/// Merge, split, inspect and draw PDF files: local, no network, no questions
+/// Merge, split, inspect and draw PDF files, rotate and delete pages: local, no network, no questions
 ///
 /// DanonPDF for scripts and AI agents. It does one operation per run, never
 /// waits for input, and reports the result as a line of text or, with
@@ -254,13 +284,16 @@ impl Cli {
     {
         let cli = Self::try_parse_from(args)?;
         // One arm per command, each with the checks that clap cannot do.
-        // A merge and a render have one each; the other three are named
-        // all the same, so that a new command has to be placed here on
-        // purpose.
+        // A merge and a render have one each; the others are named all the
+        // same, so that a new command has to be placed here on purpose.
         match &cli.command {
             Command::Merge(merge) => merge.check()?,
             Command::Render(render) => render.check()?,
-            Command::Info(_) | Command::Extract(_) | Command::Split(_) => {}
+            Command::Info(_)
+            | Command::Extract(_)
+            | Command::Split(_)
+            | Command::Rotate(_)
+            | Command::Delete(_) => {}
         }
         Ok(cli)
     }
@@ -292,6 +325,8 @@ pub enum Command {
     Info(InfoArgs),
 
     /// Copy chosen pages of a PDF file, in the order given, into a new file
+    ///
+    /// Also the way to reorder pages: name every page, in the new order.
     #[command(
         name = Operation::Extract.name(),
         after_help = HELP_POINTER,
@@ -314,6 +349,22 @@ pub enum Command {
         after_long_help = CONTRACT
     )]
     Render(RenderArgs),
+
+    /// Turn pages of a PDF file by 90, 180 or 270 degrees, into a new file
+    #[command(
+        name = Operation::Rotate.name(),
+        after_help = HELP_POINTER,
+        after_long_help = CONTRACT
+    )]
+    Rotate(RotateArgs),
+
+    /// Delete chosen pages of a PDF file: the others go into a new file
+    #[command(
+        name = Operation::Delete.name(),
+        after_help = HELP_POINTER,
+        after_long_help = CONTRACT
+    )]
+    Delete(DeleteArgs),
 }
 
 impl Command {
@@ -327,6 +378,8 @@ impl Command {
             Self::Extract(_) => Operation::Extract,
             Self::Split(_) => Operation::Split,
             Self::Render(_) => Operation::Render,
+            Self::Rotate(_) => Operation::Rotate,
+            Self::Delete(_) => Operation::Delete,
         }
     }
 }
@@ -544,6 +597,83 @@ fn is_png_path(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
 }
 
+#[derive(Debug, Args)]
+pub struct RotateArgs {
+    /// How far to turn the pages, to the right (clockwise): 90, 180 or 270
+    // The field is a `Turn`, the core's own type, and the core reads it
+    // from the text (see `quarter_turns` below). A rotation that was parsed
+    // can therefore only hold a turn that exists: 45 degrees never gets as
+    // far as this struct.
+    #[arg(long, value_name = "DEGREES", value_parser = quarter_turns)]
+    pub degrees: Turn,
+
+    /// The pages to turn, in any order: for example 1-3,7,10-
+    // `default_value` is a text, not a `PageSelection`: clap reads it with
+    // the same `FromStr` as a value that was typed, so "every page" needs
+    // no way of its own to be built. clap also adds "[default: 1-]" to the
+    // help line by itself.
+    #[arg(long, value_name = "PAGES", default_value = EVERY_PAGE)]
+    pub pages: PageSelection,
+
+    /// Where to write the new PDF; the path is used exactly as given
+    #[arg(long, value_name = "FILE")]
+    pub output: PathBuf,
+
+    /// Replace the output if it already exists (it may never be the input)
+    #[arg(long)]
+    pub force: bool,
+
+    /// Print the result as one JSON object on stdout, also when it fails
+    #[arg(long)]
+    pub json: bool,
+
+    /// The PDF file whose pages are turned; it is only read
+    #[arg(value_name = "INPUT")]
+    pub input: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct DeleteArgs {
+    /// The pages to leave out, in any order: for example 1-3,7,10-
+    // Required, unlike the `--pages` of a rotation: "delete" with no pages
+    // named has no sensible meaning, and "every page" is refused anyway.
+    #[arg(long, value_name = "PAGES")]
+    pub pages: PageSelection,
+
+    /// Where to write the new PDF; the path is used exactly as given
+    #[arg(long, value_name = "FILE")]
+    pub output: PathBuf,
+
+    /// Replace the output if it already exists (it may never be the input)
+    #[arg(long)]
+    pub force: bool,
+
+    /// Print the result as one JSON object on stdout, also when it fails
+    #[arg(long)]
+    pub json: bool,
+
+    /// The PDF file to take the other pages from; it is only read
+    #[arg(value_name = "INPUT")]
+    pub input: PathBuf,
+}
+
+/// Reads the value of `--degrees`.
+///
+/// The core does the reading: `text.parse()` gives a `Turn` for `0`, `90`,
+/// `180` and `270`, and an error for anything else. Two things are added
+/// here. A turn of 0 is refused: the core needs it, for a page that stays
+/// as it is, but a command line that asks to turn pages by nothing is a
+/// mistake. And the reason given is the tool's own sentence, because the
+/// core's counts `0` among what may be written.
+fn quarter_turns(text: &str) -> Result<Turn, String> {
+    // A `match` on what the parse gave back. `|` joins the two cases that
+    // end the same way; `Ok(turn)` then takes every turn that is left.
+    match text.parse::<Turn>() {
+        Ok(Turn::Zero) | Err(_) => Err(texts::not_a_turn()),
+        Ok(turn) => Ok(turn),
+    }
+}
+
 /// Reads the value of `--every`.
 ///
 /// `text.parse()` alone would do: it already refuses 0, a fraction and
@@ -622,6 +752,22 @@ mod tests {
         render
     }
 
+    /// The arguments of the `rotate` command in `args`.
+    fn rotate_args(args: &[&str]) -> RotateArgs {
+        let Command::Rotate(rotate) = parse(args).unwrap().command else {
+            panic!("{args:?} is not a rotate");
+        };
+        rotate
+    }
+
+    /// The arguments of the `delete` command in `args`.
+    fn delete_args(args: &[&str]) -> DeleteArgs {
+        let Command::Delete(delete) = parse(args).unwrap().command else {
+            panic!("{args:?} is not a delete");
+        };
+        delete
+    }
+
     #[test]
     fn the_declarations_are_consistent() {
         // clap checks many mistakes (two flags with one name, a required
@@ -635,7 +781,7 @@ mod tests {
         // A smallest valid command line for each command, starting with the
         // name of its operation. If the name typed and the operation ever
         // came apart, the line would not parse, or would run another one.
-        let lines: [(Operation, &[&str]); 5] = [
+        let lines: [(Operation, &[&str]); 7] = [
             (Operation::Merge, &["--output", "o.pdf", "a.pdf", "b.pdf"]),
             (Operation::Info, &["a.pdf"]),
             (
@@ -646,6 +792,14 @@ mod tests {
             (
                 Operation::Render,
                 &["--page", "1", "--output", "o.png", "a.pdf"],
+            ),
+            (
+                Operation::Rotate,
+                &["--degrees", "90", "--output", "o.pdf", "a.pdf"],
+            ),
+            (
+                Operation::Delete,
+                &["--pages", "1", "--output", "o.pdf", "a.pdf"],
             ),
         ];
         for (operation, rest) in lines {
@@ -1014,6 +1168,184 @@ mod tests {
             width.get_default_values(),
             [DEFAULT_RENDER_WIDTH.to_string().as_str()]
         );
+    }
+
+    // rotate
+
+    #[test]
+    fn rotate_turns_every_page_unless_told_which() {
+        let rotate = rotate_args(&["rotate", "--degrees", "90", "--output", "out.pdf", "in.pdf"]);
+
+        assert_eq!(rotate.degrees, Turn::Quarter);
+        // No `--pages`: page 1 and every page after it, however many the
+        // document turns out to have.
+        assert_eq!(rotate.pages.resolve(4).unwrap(), [1, 2, 3, 4]);
+        assert_eq!(rotate.pages.resolve(1).unwrap(), [1]);
+        assert_eq!(rotate.output, PathBuf::from("out.pdf"));
+        assert_eq!(rotate.input, PathBuf::from("in.pdf"));
+        assert!(!rotate.force, "--force must be off unless given");
+        assert!(!rotate.json, "--json must be off unless given");
+
+        let rotate = rotate_args(&[
+            "rotate",
+            "--pages",
+            "3,1",
+            "--degrees",
+            "90",
+            "--output",
+            "out.pdf",
+            "in.pdf",
+        ]);
+        assert_eq!(rotate.pages.resolve(5).unwrap(), [3, 1]);
+    }
+
+    #[test]
+    fn degrees_are_read_into_the_turn_of_the_core() {
+        let turns = [
+            ("90", Turn::Quarter),
+            ("180", Turn::Half),
+            ("270", Turn::ThreeQuarters),
+        ];
+        for (degrees, turn) in turns {
+            let rotate = rotate_args(&[
+                "rotate",
+                "--degrees",
+                degrees,
+                "--output",
+                "out.pdf",
+                "in.pdf",
+            ]);
+
+            assert_eq!(rotate.degrees, turn, "{degrees:?}");
+        }
+    }
+
+    #[test]
+    fn degrees_must_be_90_180_or_270() {
+        // "0" is a turn for the core, and a rotation that turns nothing:
+        // asking for it is a mistake in the command line. The others are
+        // no turn at all.
+        for degrees in ["0", "45", "360", "abc", "90.0", "+90", ""] {
+            let error = parse(&[
+                "rotate",
+                "--json",
+                "--degrees",
+                degrees,
+                "--output",
+                "out.pdf",
+                "in.pdf",
+            ])
+            .unwrap_err();
+
+            assert_eq!(error.kind(), ErrorKind::ValueValidation, "{degrees:?}");
+            assert_eq!(error.exit_code(), 2, "{degrees:?}");
+            let text = error.to_string();
+            assert!(
+                text.contains("--degrees <DEGREES>"),
+                "{degrees:?} gave: {text}"
+            );
+            assert!(
+                text.contains("the turn must be 90, 180 or 270"),
+                "{degrees:?} gave: {text}"
+            );
+        }
+        // A negative number looks like a flag to the parser, which refuses
+        // it one step earlier. It is a usage error all the same.
+        let negative =
+            parse(&["rotate", "--degrees", "-90", "--output", "o.pdf", "in.pdf"]).unwrap_err();
+        assert_eq!(negative.exit_code(), 2);
+    }
+
+    #[test]
+    fn rotate_needs_degrees_an_output_and_one_input() {
+        let lines: [&[&str]; 4] = [
+            &["rotate", "--output", "out.pdf", "in.pdf"],
+            &["rotate", "--degrees", "90", "in.pdf"],
+            &["rotate", "--degrees", "90", "--output", "out.pdf"],
+            &[
+                "rotate",
+                "--degrees",
+                "90",
+                "--output",
+                "o.pdf",
+                "a.pdf",
+                "b.pdf",
+            ],
+        ];
+        for line in lines {
+            let error = parse(line).unwrap_err();
+
+            assert_eq!(error.exit_code(), 2, "{line:?}");
+        }
+    }
+
+    // delete
+
+    #[test]
+    fn delete_reads_the_pages_into_a_selection() {
+        let delete = delete_args(&[
+            "delete", "--pages", "4,1-2", "--output", "out.pdf", "in.pdf",
+        ]);
+
+        assert_eq!(delete.pages.resolve(5).unwrap(), [4, 1, 2]);
+        assert_eq!(delete.output, PathBuf::from("out.pdf"));
+        assert_eq!(delete.input, PathBuf::from("in.pdf"));
+        assert!(!delete.force, "--force must be off unless given");
+        assert!(!delete.json, "--json must be off unless given");
+    }
+
+    #[test]
+    fn delete_needs_pages_an_output_and_one_input() {
+        let lines: [&[&str]; 4] = [
+            // No default here: a delete that names no page is refused, it
+            // does not delete every page.
+            &["delete", "--output", "out.pdf", "in.pdf"],
+            &["delete", "--pages", "1", "in.pdf"],
+            &["delete", "--pages", "1", "--output", "out.pdf"],
+            &[
+                "delete", "--pages", "1", "--output", "o.pdf", "a.pdf", "b.pdf",
+            ],
+        ];
+        for line in lines {
+            let error = parse(line).unwrap_err();
+
+            assert_eq!(error.exit_code(), 2, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn the_pages_of_a_rotate_and_of_a_delete_are_read_as_those_of_an_extract() {
+        // The same type stands behind the three `--pages`, so the same
+        // texts are refused, for the same reasons. Each command is given
+        // the rest of a line that would otherwise be valid.
+        let commands: [(&str, &[&str]); 2] = [
+            (
+                "rotate",
+                &["--degrees", "90", "--output", "o.pdf", "in.pdf"],
+            ),
+            ("delete", &["--output", "o.pdf", "in.pdf"]),
+        ];
+        let cases = [
+            ("5-3", "runs backwards"),
+            ("1-5,3", "page 3 is listed more than once"),
+            ("0", "there is no page 0"),
+        ];
+        for (command, rest) in commands {
+            for (pages, reason) in cases {
+                let mut args = vec![command, "--json", "--pages", pages];
+                args.extend(rest);
+
+                let error = parse(&args).unwrap_err();
+
+                assert_eq!(error.kind(), ErrorKind::ValueValidation, "{args:?}");
+                assert_eq!(error.exit_code(), 2, "{args:?}");
+                let text = error.to_string();
+                assert!(
+                    text.contains("--pages <PAGES>") && text.contains(reason),
+                    "{args:?} gave: {text}"
+                );
+            }
+        }
     }
 
     // Help and version
