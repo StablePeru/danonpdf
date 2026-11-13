@@ -1,6 +1,7 @@
 //! The PDF logic of DanonPDF. It knows nothing about windows or buttons, so
 //! every piece of it can be tested without a screen.
 
+mod arrange;
 mod document;
 mod errors;
 mod merge;
@@ -11,9 +12,11 @@ mod save;
 mod split;
 #[cfg(test)]
 mod test_support;
+mod turn;
 
 // The modules stay private; these names are their public face, so callers
 // write `danonpdf_core::merge_files` and not the longer path.
+pub use arrange::{PageEdit, arrange_file, delete_file, rotate_file};
 pub use errors::{PdfError, WhichInput, error_chain};
 pub use merge::{merge_documents, merge_files};
 pub use pages::{PageSelection, PageSyntaxError};
@@ -23,6 +26,7 @@ pub use render::{
     default_library_folder, write_png,
 };
 pub use split::{SplitError, SplitPlan, extract_file, page_count, plan_split, split_output_paths};
+pub use turn::{Turn, TurnSyntaxError};
 
 use std::path::Path;
 

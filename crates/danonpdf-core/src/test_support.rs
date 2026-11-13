@@ -159,6 +159,37 @@ pub(crate) fn with_red_bottom_half() -> Document {
     with_one_page(595, 842, fill_bottom_half)
 }
 
+/// A three-page document ("A1", "A2", "A3") whose first page carries a link
+/// that jumps to the third page.
+pub(crate) fn with_a_link_from_page_1_to_page_3() -> Document {
+    let mut document = with_pages("A", 3);
+    let pages: Vec<ObjectId> = document.page_iter().collect();
+    let link_id = document.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Link",
+        "Rect" => a4(),
+        "Dest" => vec![Object::Reference(pages[2]), "Fit".into()],
+    });
+    document
+        .get_dictionary_mut(pages[0])
+        .unwrap()
+        .set("Annots", vec![Object::Reference(link_id)]);
+    document
+}
+
+/// The object that the link on the first page of `document` jumps to, as
+/// the link names it.
+pub(crate) fn link_target(document: &Document) -> ObjectId {
+    let first_page = document.page_iter().next().unwrap();
+    let annotations = document.get_page_annotations(first_page).unwrap();
+    annotations[0]
+        .get(b"Dest")
+        .and_then(Object::as_array)
+        .unwrap()[0]
+        .as_reference()
+        .unwrap()
+}
+
 /// The marker text of every page, in page order.
 pub(crate) fn markers(document: &Document) -> Vec<String> {
     document
@@ -173,6 +204,32 @@ pub(crate) fn markers(document: &Document) -> Vec<String> {
                 .and_then(|operand| operand.as_str().ok())
                 .expect("every test page draws one marker");
             String::from_utf8_lossy(text).into_owned()
+        })
+        .collect()
+}
+
+/// Gives page `number` (counted from 1) a `/Rotate` of its own.
+pub(crate) fn set_rotation(document: &mut Document, number: usize, degrees: i64) {
+    let page_id = document.page_iter().nth(number - 1).unwrap();
+    document
+        .get_dictionary_mut(page_id)
+        .unwrap()
+        .set("Rotate", degrees);
+}
+
+/// The `/Rotate` that every page holds itself, in page order: `None` for a
+/// page without the key. What a page would inherit from its page tree does
+/// not count, so a test sees exactly what was written on the page.
+pub(crate) fn rotations(document: &Document) -> Vec<Option<i64>> {
+    document
+        .page_iter()
+        .map(|page_id| {
+            let page = document.get_dictionary(page_id).unwrap();
+            // `ok()` turns "no such key" into `None`; a key that is there
+            // must hold a whole number, or the test stops here.
+            page.get(b"Rotate")
+                .ok()
+                .map(|value| value.as_i64().expect("/Rotate is a whole number"))
         })
         .collect()
 }

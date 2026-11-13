@@ -142,6 +142,10 @@ pub enum ErrorCode {
     BrokenPdf,
     /// A page was asked for that the document does not have.
     PageOutOfRange,
+    /// A page was asked for more than once.
+    PageRepeated,
+    /// The new document would have no pages.
+    NoPagesLeft,
     /// An output file, or the folder for it, could not be written.
     SaveFailed,
     /// The library that draws pages (PDFium) is missing or cannot be
@@ -181,6 +185,8 @@ impl ErrorCode {
             Self::Encrypted => "encrypted",
             Self::BrokenPdf => "broken_pdf",
             Self::PageOutOfRange => "page_out_of_range",
+            Self::PageRepeated => "page_repeated",
+            Self::NoPagesLeft => "no_pages_left",
             Self::SaveFailed => "save_failed",
             Self::RendererUnavailable => "renderer_unavailable",
             Self::RenderFailed => "render_failed",
@@ -273,6 +279,9 @@ pub fn failure_from<P: AsRef<Path>>(error: &PdfError, inputs: &[P]) -> Failure {
         PdfError::Broken { input, .. } => (ErrorCode::BrokenPdf, path_of(inputs, *input)),
         // About the pages that were asked for, not about a file: no path.
         PdfError::PageOutOfRange { .. } => (ErrorCode::PageOutOfRange, None),
+        // Also about the pages that were asked for: no path either.
+        PdfError::PageRepeated { .. } => (ErrorCode::PageRepeated, None),
+        PdfError::NoPagesLeft => (ErrorCode::NoPagesLeft, None),
         // Two ways for the output not to reach the disk, one code: a caller
         // does the same about both (check `path` and what is around it).
         // `|` joins two patterns into one arm; both bind `path` to the same
@@ -406,7 +415,7 @@ mod tests {
         // the `match` in `failure_from` (which has no `_` arm) stops
         // compiling, so this test cannot pass until the new variant has a
         // code. Add its case here at the same time.
-        let cases: [(PdfError, ErrorCode, Option<&str>); 7] = [
+        let cases: [(PdfError, ErrorCode, Option<&str>); 9] = [
             (PdfError::NoInputs, ErrorCode::NoInputs, None),
             (
                 PdfError::Read {
@@ -436,6 +445,12 @@ mod tests {
                 ErrorCode::PageOutOfRange,
                 None,
             ),
+            (
+                PdfError::PageRepeated { page: 3 },
+                ErrorCode::PageRepeated,
+                None,
+            ),
+            (PdfError::NoPagesLeft, ErrorCode::NoPagesLeft, None),
             (
                 PdfError::CreateFolder {
                     path: PathBuf::from("parts"),
@@ -700,6 +715,8 @@ mod tests {
             (ErrorCode::Encrypted, "encrypted"),
             (ErrorCode::BrokenPdf, "broken_pdf"),
             (ErrorCode::PageOutOfRange, "page_out_of_range"),
+            (ErrorCode::PageRepeated, "page_repeated"),
+            (ErrorCode::NoPagesLeft, "no_pages_left"),
             (ErrorCode::SaveFailed, "save_failed"),
             (ErrorCode::RendererUnavailable, "renderer_unavailable"),
             (ErrorCode::RenderFailed, "render_failed"),

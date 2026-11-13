@@ -741,8 +741,10 @@ fn help_teaches_the_whole_contract() {
             // The exit codes, and what happens to a report nobody can read.
             "Exit codes:",
             "If the report cannot be written",
-            // The one code this command line can never produce says so.
+            // The codes this command line can never produce say so.
             "no_inputs          there was nothing to merge; never reported by this",
+            "page_repeated      a page was asked for more than once; never reported by",
+            "no_pages_left      the new document would have no pages; never reported",
             // Every JSON shape.
             r#"{"ok":true,"operation":"merge","output":"merged.pdf","inputs":2,"pages":12}"#,
             r#"{"ok":true,"operation":"info","input":"report.pdf","pages":12}"#,
@@ -760,6 +762,8 @@ fn help_teaches_the_whole_contract() {
             "encrypted",
             "broken_pdf",
             "page_out_of_range",
+            "page_repeated",
+            "no_pages_left",
             "save_failed",
             "renderer_unavailable",
             "render_failed",

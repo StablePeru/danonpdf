@@ -6,13 +6,14 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use lopdf::{Document, Object, ObjectId, dictionary};
+use lopdf::{Document, Object, dictionary};
 
 use super::*;
 use crate::error_chain;
 use crate::test_support::{
-    ScratchDir, a4, count_of_type, encrypted, has_type, markers, root_pages_id,
-    with_inherited_attributes, with_pages,
+    ScratchDir, a4, count_of_type, encrypted, has_type, link_target, markers, root_pages_id,
+    rotations, set_rotation, with_a_link_from_page_1_to_page_3, with_inherited_attributes,
+    with_pages,
 };
 
 /// The page selection written as `text`.
@@ -28,37 +29,6 @@ fn every(count: usize) -> NonZeroUsize {
 /// The marker text of every page of the PDF file at `path`, in page order.
 fn markers_in(path: &Path) -> Vec<String> {
     markers(&Document::load(path).unwrap())
-}
-
-/// A three-page document ("A1", "A2", "A3") whose first page carries a link
-/// that jumps to the third page.
-fn with_a_link_from_page_1_to_page_3() -> Document {
-    let mut document = with_pages("A", 3);
-    let pages: Vec<ObjectId> = document.page_iter().collect();
-    let link_id = document.add_object(dictionary! {
-        "Type" => "Annot",
-        "Subtype" => "Link",
-        "Rect" => a4(),
-        "Dest" => vec![Object::Reference(pages[2]), "Fit".into()],
-    });
-    document
-        .get_dictionary_mut(pages[0])
-        .unwrap()
-        .set("Annots", vec![Object::Reference(link_id)]);
-    document
-}
-
-/// The object that the link on the first page of `document` jumps to, as
-/// the link names it.
-fn link_target(document: &Document) -> ObjectId {
-    let first_page = document.page_iter().next().unwrap();
-    let annotations = document.get_page_annotations(first_page).unwrap();
-    annotations[0]
-        .get(b"Dest")
-        .and_then(Object::as_array)
-        .unwrap()[0]
-        .as_reference()
-        .unwrap()
 }
 
 /// A three-page document ("A1", "A2", "A3") whose second page points at an
@@ -231,6 +201,23 @@ fn a_link_between_two_extracted_pages_still_works() {
     let last_page = extracted.page_iter().last().unwrap();
     assert_eq!(markers(&extracted), ["A1", "A3"]);
     assert_eq!(link_target(&extracted), last_page);
+}
+
+#[test]
+fn extract_carries_the_rotation_of_each_page_as_it_is() {
+    // Extracting shares its last step with arranging pages, which does
+    // rewrite `/Rotate`. An extraction turns nothing: an inherited
+    // rotation lands on the page (the new page tree has none to give) and
+    // a page's own value is not tidied up, odd as it may be.
+    let mut input = with_pages("A", 3);
+    let root_id = root_pages_id(&input);
+    input.get_dictionary_mut(root_id).unwrap().set("Rotate", 90);
+    set_rotation(&mut input, 2, -90);
+
+    let extracted = extract_document(input, &selection("2,1")).unwrap();
+
+    assert_eq!(markers(&extracted), ["A2", "A1"]);
+    assert_eq!(rotations(&extracted), [Some(-90), Some(90)]);
 }
 
 #[test]

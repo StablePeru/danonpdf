@@ -182,6 +182,13 @@ Error codes (stable: test for these, not for the message):
   broken_pdf         an input opened, but its structure is damaged
   page_out_of_range  --pages or --page names a page past the end of the
                      document
+  page_repeated      a page was asked for more than once; never reported by
+                     this command line, which refuses such a --pages list
+                     first as a usage error (exit code 2, plain text on
+                     stderr)
+  no_pages_left      the new document would have no pages; never reported
+                     by this command line, which has no command that
+                     deletes pages
   save_failed        an output file, or the folder for it, could not be
                      written
   renderer_unavailable
