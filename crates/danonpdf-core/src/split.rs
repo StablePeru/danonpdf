@@ -82,17 +82,22 @@ fn extract_document(document: Document, pages: &PageSelection) -> Result<Documen
 }
 
 /// A document that pages can be taken from.
-struct Source {
-    document: Document,
+///
+/// `pub(crate)`: `arrange.rs` builds its documents out of one too, so that
+/// "these pages, in this order, with what they use" is written once, here.
+pub(crate) struct Source {
+    /// The document itself. Its pages already hold the attributes they
+    /// used to inherit, their rotation among them.
+    pub(crate) document: Document,
     /// The id of every page, in page order. Page 1 is `pages[0]`.
-    pages: Vec<ObjectId>,
+    pub(crate) pages: Vec<ObjectId>,
     /// Every page and every node of the old page tree. Collecting what a
     /// page uses stops at these: see [`objects_used_by`].
     fence: HashSet<ObjectId>,
 }
 
 impl Source {
-    fn load(input: &Path) -> Result<Self, PdfError> {
+    pub(crate) fn load(input: &Path) -> Result<Self, PdfError> {
         Self::new(load(input)?)
     }
 
@@ -100,7 +105,7 @@ impl Source {
     ///
     /// There is one input here, so every problem is reported for "the
     /// file" ([`WhichInput::Only`]) and not for a numbered input.
-    fn new(mut document: Document) -> Result<Self, PdfError> {
+    pub(crate) fn new(mut document: Document) -> Result<Self, PdfError> {
         if is_locked(&document) {
             return Err(InputProblem::Encrypted.at(WhichInput::Only));
         }
@@ -124,11 +129,6 @@ impl Source {
 
     /// A new document made of the pages that `selection` names, in its
     /// order.
-    ///
-    /// Takes `self` by value: this is the last use of the source, so the
-    /// objects of the chosen pages are moved into the new document instead
-    /// of being copied. For a big scan that is the difference between
-    /// holding its images in memory once and holding them twice.
     fn extract(self, selection: &PageSelection) -> Result<Document, PdfError> {
         let numbers = selection.resolve(self.pages.len())?;
         // Page numbers count from 1 and positions in a `Vec` from 0, hence
@@ -139,7 +139,18 @@ impl Source {
             .map(|&number| self.pages[number - 1])
             .collect();
 
-        let used = objects_used_by(&self.document, &chosen, &self.fence);
+        self.take(&chosen)
+    }
+
+    /// A new document made of `pages` (ids of pages of this source), in
+    /// that order. Every page that is not among them stays behind.
+    ///
+    /// Takes `self` by value: this is the last use of the source, so the
+    /// objects of the chosen pages are moved into the new document instead
+    /// of being copied. For a big scan that is the difference between
+    /// holding its images in memory once and holding them twice.
+    pub(crate) fn take(self, pages: &[ObjectId]) -> Result<Document, PdfError> {
+        let used = objects_used_by(&self.document, pages, &self.fence);
         // `self.document.objects` is moved out of the source: allowed
         // because `self` is owned here and nothing uses that field again.
         let mut objects = self.document.objects;
@@ -147,7 +158,7 @@ impl Source {
         // drops the rest, in place.
         objects.retain(|id, _| used.contains(id));
 
-        new_document(&self.document.version, objects, &chosen)
+        new_document(&self.document.version, objects, pages)
             .map_err(|problem| problem.at(WhichInput::Only))
     }
 

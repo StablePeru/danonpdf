@@ -2,10 +2,11 @@
 //! when it worked, a [`Failure`] when it did not.
 //!
 //! Each operation has its own module (`merge.rs`, `info.rs`, `extract.rs`,
-//! `split.rs`, `render.rs`) with a `run` function that returns
-//! `Result<Report, Failure>`. Nothing in those modules prints or ends the
-//! program: `output.rs` decides how to show either value. That split keeps
-//! the rules testable without starting a program and reading its output.
+//! `split.rs`, `render.rs`, `rotate.rs`, `delete.rs`) with a `run` function
+//! that returns `Result<Report, Failure>`. Nothing in those modules prints
+//! or ends the program: `output.rs` decides how to show either value. That
+//! split keeps the rules testable without starting a program and reading
+//! its output.
 //!
 //! What the operations share lives here: the names they go by, the shape
 //! of a failure, the two places where an error of the core gets its code
@@ -26,6 +27,8 @@ pub enum Operation {
     Extract,
     Split,
     Render,
+    Rotate,
+    Delete,
 }
 
 impl Operation {
@@ -46,6 +49,8 @@ impl Operation {
             Self::Extract => "extract",
             Self::Split => "split",
             Self::Render => "render",
+            Self::Rotate => "rotate",
+            Self::Delete => "delete",
         }
     }
 }
@@ -98,6 +103,19 @@ pub enum Report {
         width: u32,
         height: u32,
     },
+    Rotate {
+        /// Where the new file was written.
+        output: PathBuf,
+        /// How many pages it has: every page of the input, the ones that
+        /// were turned and the ones that were not.
+        pages: usize,
+    },
+    Delete {
+        /// Where the new file was written.
+        output: PathBuf,
+        /// How many pages it has: the ones that were not deleted.
+        pages: usize,
+    },
 }
 
 /// Why an operation did not happen, or did not finish.
@@ -142,6 +160,10 @@ pub enum ErrorCode {
     BrokenPdf,
     /// A page was asked for that the document does not have.
     PageOutOfRange,
+    /// A page was asked for more than once.
+    PageRepeated,
+    /// The new document would have no pages.
+    NoPagesLeft,
     /// An output file, or the folder for it, could not be written.
     SaveFailed,
     /// The library that draws pages (PDFium) is missing or cannot be
@@ -181,6 +203,8 @@ impl ErrorCode {
             Self::Encrypted => "encrypted",
             Self::BrokenPdf => "broken_pdf",
             Self::PageOutOfRange => "page_out_of_range",
+            Self::PageRepeated => "page_repeated",
+            Self::NoPagesLeft => "no_pages_left",
             Self::SaveFailed => "save_failed",
             Self::RendererUnavailable => "renderer_unavailable",
             Self::RenderFailed => "render_failed",
@@ -273,6 +297,9 @@ pub fn failure_from<P: AsRef<Path>>(error: &PdfError, inputs: &[P]) -> Failure {
         PdfError::Broken { input, .. } => (ErrorCode::BrokenPdf, path_of(inputs, *input)),
         // About the pages that were asked for, not about a file: no path.
         PdfError::PageOutOfRange { .. } => (ErrorCode::PageOutOfRange, None),
+        // Also about the pages that were asked for: no path either.
+        PdfError::PageRepeated { .. } => (ErrorCode::PageRepeated, None),
+        PdfError::NoPagesLeft => (ErrorCode::NoPagesLeft, None),
         // Two ways for the output not to reach the disk, one code: a caller
         // does the same about both (check `path` and what is around it).
         // `|` joins two patterns into one arm; both bind `path` to the same
@@ -406,7 +433,7 @@ mod tests {
         // the `match` in `failure_from` (which has no `_` arm) stops
         // compiling, so this test cannot pass until the new variant has a
         // code. Add its case here at the same time.
-        let cases: [(PdfError, ErrorCode, Option<&str>); 7] = [
+        let cases: [(PdfError, ErrorCode, Option<&str>); 9] = [
             (PdfError::NoInputs, ErrorCode::NoInputs, None),
             (
                 PdfError::Read {
@@ -436,6 +463,12 @@ mod tests {
                 ErrorCode::PageOutOfRange,
                 None,
             ),
+            (
+                PdfError::PageRepeated { page: 3 },
+                ErrorCode::PageRepeated,
+                None,
+            ),
+            (PdfError::NoPagesLeft, ErrorCode::NoPagesLeft, None),
             (
                 PdfError::CreateFolder {
                     path: PathBuf::from("parts"),
@@ -656,7 +689,7 @@ mod tests {
 
     #[test]
     fn an_error_about_the_only_input_names_that_file_and_no_number() {
-        // `info`, `extract` and `split` read one file. The code and the
+        // Every operation but `merge` reads one file. The code and the
         // path are what they are for a merge; only the words differ.
         let report = [Path::new("report.pdf")];
 
@@ -700,6 +733,8 @@ mod tests {
             (ErrorCode::Encrypted, "encrypted"),
             (ErrorCode::BrokenPdf, "broken_pdf"),
             (ErrorCode::PageOutOfRange, "page_out_of_range"),
+            (ErrorCode::PageRepeated, "page_repeated"),
+            (ErrorCode::NoPagesLeft, "no_pages_left"),
             (ErrorCode::SaveFailed, "save_failed"),
             (ErrorCode::RendererUnavailable, "renderer_unavailable"),
             (ErrorCode::RenderFailed, "render_failed"),
@@ -719,6 +754,8 @@ mod tests {
             (Operation::Extract, "extract"),
             (Operation::Split, "split"),
             (Operation::Render, "render"),
+            (Operation::Rotate, "rotate"),
+            (Operation::Delete, "delete"),
         ];
         for (operation, name) in names {
             assert_eq!(operation.name(), name);

@@ -8,7 +8,7 @@ Use `danonpdf-cli` to work with PDF files without the window. It runs one operat
 2. Read the exit code: `0` done, `1` refused or failed, `2` wrong command line.
 3. For `0` and `1`, parse the single line on stdout as JSON and test `ok`.
 
-To take pages out of a file, ask how many it has first: `danonpdf-cli info --json IN.pdf`.
+To take pages out of a file, or to turn, delete or reorder them, ask how many it has first: `danonpdf-cli info --json IN.pdf`.
 
 To look at a page, draw it as an image: `danonpdf-cli render --json --page 1 --output PAGE.png IN.pdf`. This is the one command that needs the PDFium library: see [The PDFium library](#the-pdfium-library).
 
@@ -20,6 +20,8 @@ danonpdf-cli info    [--json] <INPUT>
 danonpdf-cli extract --pages <PAGES> --output <FILE> [--force] [--json] <INPUT>
 danonpdf-cli split   [--every <N>] --output-dir <DIR> [--force] [--json] <INPUT>
 danonpdf-cli render  --page <N> [--width <PX>] --output <FILE> [--force] [--json] <INPUT>
+danonpdf-cli rotate  --degrees <90|180|270> [--pages <PAGES>] --output <FILE> [--force] [--json] <INPUT>
+danonpdf-cli delete  --pages <PAGES> --output <FILE> [--force] [--json] <INPUT>
 danonpdf-cli --help | --version | help <COMMAND>
 ```
 
@@ -30,12 +32,17 @@ danonpdf-cli --help | --version | help <COMMAND>
 | `extract` | Copies the pages chosen with `--pages`, in the order given, into one new file. |
 | `split` | Writes the pages into several files of `--every` pages each. The last one may have fewer. |
 | `render` | Draws one page and writes it as a PNG image. See [Images](#images). |
+| `rotate` | Writes every page into one new file, in the same order, with the pages chosen with `--pages` turned to the right by `--degrees`. Without `--pages`, every page is turned. |
+| `delete` | Writes the pages that `--pages` does not choose, in the same order, into one new file. |
+
+There is no command to reorder pages: `extract` does it. See [Reordering pages](#reordering-pages).
 
 | Part | Meaning |
 | --- | --- |
 | `<INPUT>` | The PDF file to read. `merge` takes at least two; the others take exactly one. |
-| `--output <FILE>` | Where to write the new PDF (`merge`, `extract`) or the PNG image (`render`, and then the name must end in `.png`). Required. |
-| `--pages <PAGES>` | Which pages to take (`extract`). Required. See [Pages](#pages). |
+| `--output <FILE>` | Where to write the new PDF (`merge`, `extract`, `rotate`, `delete`) or the PNG image (`render`, and then the name must end in `.png`). Required. |
+| `--pages <PAGES>` | Which pages to take (`extract`), to turn (`rotate`) or to leave out (`delete`). Required for `extract` and `delete`; for `rotate` the default is `1-`, every page. See [Pages](#pages). |
+| `--degrees <DEGREES>` | How far to turn the pages, to the right (`rotate`). Required: `90`, `180` or `270`. Anything else, `0` included, is a usage error. |
 | `--every <N>` | How many pages go into each file (`split`). A whole number, 1 or more. Default: 1, one file per page. |
 | `--output-dir <DIR>` | The folder for the new files (`split`). Required. Created if it does not exist. |
 | `--page <N>` | The page to draw, counted from 1 (`render`). Required. |
@@ -55,7 +62,9 @@ Put `--` before the inputs if one of them starts with `-`.
 | `A-B` | Pages A to B, both included. A must not be above B. | `1-3` |
 | `A-` | Page A and every page after it. | `10-` |
 
-`1-3,7,10-` takes pages 1, 2, 3 and 7, and from 10 to the last one. The pages are written in the order given: `3,1` puts page 3 first. Spaces around an item are ignored.
+`1-3,7,10-` selects pages 1, 2, 3 and 7, and from 10 to the last one. Spaces around an item are ignored.
+
+The order of the items matters to `extract` only: it writes the pages in the order given, so `3,1` puts page 3 first. `rotate` and `delete` only look at which pages are named: what they write stays in the order of the input.
 
 | Mistake | Example | Result |
 | --- | --- | --- |
@@ -67,6 +76,25 @@ Put `--` before the inputs if one of them starts with `-`.
 | A page past the end of the document | `9` on 5 pages | Failure `page_out_of_range`, exit code `1`. |
 
 The first five are found in the text alone, before any file is opened. The last one needs the document, so it is reported like any other failure of the operation.
+
+## Rotating and deleting pages
+
+`rotate` and `delete` write a new file and only read the input. Neither changes a file in place: `--output` must be another file.
+
+- `rotate --degrees 90 --pages 5- --output OUT.pdf IN.pdf` writes every page of `IN.pdf`, with page 5 and the ones after it turned a quarter turn to the right.
+- The turn is added to the rotation a page already has: `90` on a page that lies at 270 degrees leaves it upright. To turn to the left, use `270`.
+- `delete --pages 2,5-6 --output OUT.pdf IN.pdf` writes every page of `IN.pdf` except pages 2, 5 and 6.
+- `delete` refuses a `--pages` that selects every page: failure `no_pages_left`, exit code `1`, nothing written.
+
+## Reordering pages
+
+Use `extract` and name every page, in the new order:
+
+```text
+danonpdf-cli extract --json --pages 3,1,2,4- --output OUT.pdf IN.pdf
+```
+
+That writes page 3 first, then pages 1 and 2, then page 4 and every page after it. A page that is not named is left out of the new file, so compare `pages` in the report with what `info` says about the input.
 
 ## Split file names
 
@@ -97,7 +125,7 @@ The first five are found in the text alone, before any file is opened. The last 
 
 ### The PDFium library
 
-`render` draws with PDFium, a library that it loads from a file when it runs. `merge`, `info`, `extract` and `split` never load it and work without it.
+`render` draws with PDFium, a library that it loads from a file when it runs. `merge`, `info`, `extract`, `split`, `rotate` and `delete` never load it and work without it.
 
 | System | File |
 | --- | --- |
@@ -144,6 +172,8 @@ A success has one shape per command:
 {"ok":true,"operation":"extract","output":"OUT.pdf","pages":7}
 {"ok":true,"operation":"split","outputs":["DIR/IN-001.pdf","DIR/IN-002.pdf"],"files":2,"pages":12}
 {"ok":true,"operation":"render","output":"PAGE.png","page":1,"width":1024,"height":1449}
+{"ok":true,"operation":"rotate","output":"OUT.pdf","pages":12}
+{"ok":true,"operation":"delete","output":"OUT.pdf","pages":9}
 ```
 
 A failure has the same shape for every command:
@@ -156,13 +186,13 @@ A failure has the same shape for every command:
 
 | Field | Meaning |
 | --- | --- |
-| `operation` | The command that ran: `merge`, `info`, `extract`, `split` or `render`. |
+| `operation` | The command that ran: `merge`, `info`, `extract`, `split`, `render`, `rotate` or `delete`. |
 | `input` | The input path, as given (`info`). |
-| `output` | The output path, as given (`merge`, `extract`, `render`). |
+| `output` | The output path, as given (`merge`, `extract`, `render`, `rotate`, `delete`). |
 | `outputs` | The files written, as paths inside `--output-dir`, in page order (`split`). |
 | `inputs` | How many input files were read (`merge`). |
 | `files` | How many files were written (`split`). |
-| `pages` | How many pages: of the input for `info` and `split`, of the output for `merge` and `extract`. |
+| `pages` | How many pages: of the input for `info` and `split`, of the output for `merge`, `extract`, `rotate` and `delete`. For `rotate` that is every page of the input, turned or not; for `delete`, the pages that are left. |
 | `page` | The page that was drawn, counted from 1 (`render`). |
 | `width`, `height` | The size in pixels of the image that was written (`render`). `width` can be below the `--width` asked for: see [Images](#images). |
 | `error.code` | One of the stable codes below. Decide on this. |
@@ -183,23 +213,29 @@ A path that is not valid Unicode is written with replacement characters.
 | `encrypted` | An input needs a password. For `render`, also an input protected in a way that cannot be opened at all. | Not supported; use an unlocked copy. |
 | `broken_pdf` | An input opened, but its structure is damaged. | Check `error.path`. |
 | `page_out_of_range` | `--pages` or `--page` names a page past the end of the document. | Run `info` to get the page count, then ask again. There is no `error.path`. |
+| `page_repeated` | A page was asked for more than once. | Nothing: this command line never reports it. A `--pages` list with a repeated page is refused first as a usage error (exit code `2`, plain text on stderr). The code is listed because it is part of the contract. |
+| `no_pages_left` | The new document would have no pages: `delete` was given a `--pages` that selects every page of the input. | Name fewer pages. Nothing was written. There is no `error.path`. |
 | `save_failed` | An output file, or the folder for it, could not be written. | Check that `error.path`, or its folder, can be written. After a `split`, look at `error.written` for files that are already there. |
 | `renderer_unavailable` | The PDFium library is missing or cannot be loaded. Only `render` reports it, and nothing is wrong with the input. | Put the library file where `error.path` says, or set `DANONPDF_PDFIUM_DIR` to its folder. Without `error.path`, set the variable. The other commands still work. |
 | `render_failed` | The page was not drawn, and no other code says why: PDFium gave up on the file without a reason. Only `render` reports it. | Read `error.message`. Nothing in the command line is wrong (a `--width` that cannot be drawn is a usage error, exit code `2`, and never gets this far); try another copy of the file. |
+
+Every command can report `read_failed`, `encrypted` and `broken_pdf`. Every command but `info` can also report `output_is_input`, `output_exists` and `save_failed`. `page_out_of_range` comes from `extract`, `render`, `rotate` and `delete`, and `no_pages_left` from `delete` only. `renderer_unavailable` and `render_failed` come from `render` only.
 
 ## Rules it keeps
 
 - It never writes over an input, with or without `--force`. Another spelling of the same file (`./a.pdf`, a symbolic link) still counts as that file; a hard link does not.
 - It never replaces an existing file unless `--force` is given.
 - It writes each output in one step: a failed operation leaves no half-written file and changes no input.
-- `merge`, `extract` and `render` wait until their output is on the disk before they report, and report a failure to get it there as `save_failed`.
+- `merge`, `extract`, `render`, `rotate` and `delete` wait until their output is on the disk before they report, and report a failure to get it there as `save_failed`.
 - `split` does not wait for the disk: `"ok":true` means every file was written and named, not that it is on the disk yet. A power cut during or just after a `split` can leave files empty or incomplete, and a write error the system only meets later (a network share that went away, a quota, a full disk) is never reported. **Do not delete the input because a `split` returned `ok`.** Read the new files back first: `info` on each one, and the page counts must add up to the input's. That proves what the system holds; only time or a restart proves what the disk holds. If files are wrong or missing, run the `split` again with `--force`.
-- `merge`, `info`, `extract` and `render` write everything or nothing. `split` writes its files one after another: if one cannot be saved, it stops, keeps the ones already written and lists them in `error.written`.
+- Every command but `split` writes everything or nothing. `split` writes its files one after another: if one cannot be saved, it stops, keeps the ones already written and lists them in `error.written`.
 - It uses paths exactly as given. It does not add `.pdf` or `.png`, skip inputs by name or drop repeated inputs.
 - `render` checks the rules about its output before it looks for the PDFium library: `output_is_input` and `output_exists` are reported the same on a computer without the library.
 - `render` never changes its input, draws one page per run, and has no way to take a password.
 - Only pages and what they use are carried over. Bookmarks, named destinations, form fields, the tagged structure and the document information of the inputs are not.
 - A page that is extracted or split off does not bring other pages with it. A link to a page that is not in the new file stays on its page and leads nowhere.
+- A deleted page is gone from the new file with its content, not just hidden. The input still has it.
+- `rotate` changes how a page is shown, not what is drawn on it: a page that is turned gets a `/Rotate` of 0, 90, 180 or 270, counted from the rotation it had (its own or the one it inherited). A page whose `/Rotate` is not a multiple of 90, which the PDF format does not allow, counts as not rotated when it is turned.
 
 ## Build and test
 

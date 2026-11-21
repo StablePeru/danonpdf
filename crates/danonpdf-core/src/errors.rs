@@ -1,11 +1,11 @@
 //! What can go wrong in the core, and how an error is turned into one line
 //! of text for every front end.
 //!
-//! Every operation (merge, extract, split, counting pages) returns the same
-//! [`PdfError`]. They fail in the same ways: an input that cannot be read,
-//! that needs a password or that is damaged, and an output that cannot be
-//! written. One enum for all of them means one place where a front end
-//! decides what each failure means to its user.
+//! Every operation (merge, extract, split, counting pages, arranging pages)
+//! returns the same [`PdfError`]. They fail in the same ways: an input that
+//! cannot be read, that needs a password or that is damaged, and an output
+//! that cannot be written. One enum for all of them means one place where a
+//! front end decides what each failure means to its user.
 //!
 //! The price is that the type says a little less than it could: nothing in
 //! it tells that a merge never returns `PageOutOfRange`, or that a split
@@ -25,8 +25,8 @@ use std::path::PathBuf;
 ///
 /// A merge takes a list of files and tells them apart by their place in
 /// it. The operations that read one file (counting its pages, extract,
-/// split) have no list, and calling their file "input 1" would be the
-/// wording of a merge in the wrong place.
+/// split, arranging its pages) have no list, and calling their file
+/// "input 1" would be the wording of a merge in the wrong place.
 ///
 /// The difference is settled here, in the core, because this is where it
 /// is known: each operation says which of the two it is when it reports
@@ -68,9 +68,20 @@ pub enum PdfError {
         input: WhichInput,
         reason: &'static str,
     },
-    /// A page selection names a page that the document does not have:
-    /// `page`, in a document of `pages` pages.
+    /// A page was asked for that the document does not have: `page`, in a
+    /// document of `pages` pages. It is past the end, or it is 0 (pages
+    /// are counted from 1), which only a list of pages put together by a
+    /// program can hold: a page selection read from text never does.
     PageOutOfRange { page: usize, pages: usize },
+    /// A list of pages to write names `page` more than once. A page
+    /// selection read from text never gets this far (reading it already
+    /// refuses a repeated page, as a [`PageSyntaxError`](crate::PageSyntaxError));
+    /// this is for a list that a program put together.
+    PageRepeated { page: usize },
+    /// The new document would have no pages: every page was deleted, or
+    /// the list of pages to write is empty. Such a file is not written:
+    /// the core itself would refuse to read it back.
+    NoPagesLeft,
     /// The folder that the new files go into does not exist and could not
     /// be created.
     CreateFolder {
@@ -101,6 +112,12 @@ impl fmt::Display for PdfError {
                 write!(f, "{input} is encrypted and needs a password")
             }
             Self::Broken { input, reason } => write!(f, "{input} is damaged: {reason}"),
+            // Page numbers are counted from 1, so 0 is not "past the end":
+            // it gets the words that reading a selection uses for it. The
+            // arm comes first because the one below would take it too.
+            Self::PageOutOfRange { page: 0, .. } => {
+                write!(f, "pages are counted from 1: there is no page 0")
+            }
             Self::PageOutOfRange { page, pages } => {
                 // A `match` is an expression: each arm gives the text for
                 // one case, and `_` takes every number that is not 1.
@@ -113,6 +130,8 @@ impl fmt::Display for PdfError {
                     "page {page} is past the end of the document, which has {length}"
                 )
             }
+            Self::PageRepeated { page } => write!(f, "page {page} is listed more than once"),
+            Self::NoPagesLeft => write!(f, "no pages would be left in the document"),
             Self::CreateFolder { path, .. } => {
                 write!(f, "cannot create the folder {}", path.display())
             }
@@ -135,7 +154,9 @@ impl Error for PdfError {
             Self::NoInputs
             | Self::Encrypted { .. }
             | Self::Broken { .. }
-            | Self::PageOutOfRange { .. } => None,
+            | Self::PageOutOfRange { .. }
+            | Self::PageRepeated { .. }
+            | Self::NoPagesLeft => None,
         }
     }
 }
@@ -226,6 +247,32 @@ mod tests {
         assert_eq!(
             PdfError::PageOutOfRange { page: 2, pages: 1 }.to_string(),
             "page 2 is past the end of the document, which has 1 page"
+        );
+    }
+
+    #[test]
+    fn page_0_is_not_called_past_the_end() {
+        // A page selection read from text never holds page 0, but a list
+        // of pages put together by a program can.
+        assert_eq!(
+            PdfError::PageOutOfRange { page: 0, pages: 5 }.to_string(),
+            "pages are counted from 1: there is no page 0"
+        );
+    }
+
+    #[test]
+    fn a_repeated_page_is_named() {
+        assert_eq!(
+            PdfError::PageRepeated { page: 3 }.to_string(),
+            "page 3 is listed more than once"
+        );
+    }
+
+    #[test]
+    fn a_document_left_without_pages_says_so() {
+        assert_eq!(
+            PdfError::NoPagesLeft.to_string(),
+            "no pages would be left in the document"
         );
     }
 

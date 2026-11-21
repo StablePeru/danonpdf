@@ -1,8 +1,8 @@
 //! The info operation: say how many pages a PDF file has.
 //!
 //! It writes nothing, so it has no rule of its own to apply. A caller needs
-//! it before `extract`: a page past the end of the document is a failure,
-//! and this is how to learn where the end is.
+//! it before `extract`, `rotate` or `delete`: a page past the end of the
+//! document is a failure, and this is how to learn where the end is.
 
 use std::path::Path;
 
